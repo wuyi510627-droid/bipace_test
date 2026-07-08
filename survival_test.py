@@ -14,7 +14,7 @@ from sklearn.metrics import roc_auc_score, adjusted_rand_score
 import matplotlib.pyplot as plt
 
 # ---------------- 配置 ----------------
-MODEL   = "Qwen/Qwen2.5-7B-Instruct"   # 12G显存: 7B开4bit能跑(最贴近BiPACE的7B); 嫌麻烦用 "Qwen/Qwen2.5-3B-Instruct"(fp16直接跑)
+MODEL   = "/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct" # 12G显存: 7B开4bit能跑(最贴近BiPACE的7B); 嫌麻烦用 "Qwen/Qwen2.5-3B-Instruct"(fp16直接跑)
 USE_4BIT = True                 # 7B必开4bit省显存; 若用3B/1.5B可设False走fp16
 LAYER   = -8                    # BiPACE的7B用倒数第8层; 若换1.5B改成 -12
 EPS     = 0.15                  # BiPACE式贪心聚类的cosine距离阈值(需按下面打印的分布微调)
@@ -25,22 +25,23 @@ MAX_DISTRACTORS = 24            # U=1时注入的无关内容条数(制造真实
 BATCH = 8                       # 7B用8; 换3B/1.5B可调回16
 MAXLEN = 384
 SEED = 0
+PROMPT_TMPL = "你是一个网页/桌面操作智能体。当前界面观测如下：\n{obs}\n\n请判断此刻应采取的操作。操作："
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ---------------- 1. 造测试题 ----------------
 # 10个"任务处境"的核心语义(像web-agent的状态). 关键: 核心不变, 表面变.
 CANON = [
-    "你在一个笔记本电脑的商品详情页, 需要点击'加入购物车'。",
-    "你在搜索结果页, 需要点开第一个搜索结果。",
-    "你在登录页面, 需要在用户名框输入账号。",
-    "你打开了一个PDF的摘要部分, 需要跳到实验章节。",
-    "你在购物车页面, 需要点击'去结算'。",
-    "你在一个表单页, 需要在邮箱字段填入地址。",
-    "你在文件管理器里, 需要进入 Downloads 文件夹。",
-    "你在一封邮件里, 需要点击附件下载。",
-    "你在设置页面, 需要打开'深色模式'开关。",
-    "你在一个视频页面, 需要点击播放按钮。",
+    "在商品列表页, 把【笔记本电脑】加入购物车。",
+    "在商品列表页, 把【手机】加入购物车。",
+    "在商品列表页, 把【耳机】加入购物车。",
+    "在搜索结果页, 点开【第1个】结果。",
+    "在搜索结果页, 点开【第3个】结果。",
+    "在表单页, 在【邮箱】字段填写。",
+    "在表单页, 在【电话】字段填写。",
+    "在设置页, 打开【深色模式】开关。",
+    "在设置页, 打开【通知】开关。",
+    "在文件页, 进入【Downloads】文件夹。",
 ]
 # 无关"干扰内容"池(模拟真实网页里与任务无关、但每次都不同的表面信息)
 DISTRACT_TEMPLATES = [
@@ -73,6 +74,8 @@ def build_dataset(U):
 print(f"加载模型 {MODEL} (4bit={USE_4BIT}) ...")
 tok = AutoTokenizer.from_pretrained(MODEL)
 if tok.pad_token is None: tok.pad_token = tok.eos_token
+tok.padding_side = "left"
+tok.truncation_side = "left"   # 防止截断把结尾"操作："切掉
 if USE_4BIT and device == "cuda":
     from transformers import BitsAndBytesConfig
     bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
@@ -89,12 +92,14 @@ def embed(obs_list):
     vecs = []
     for i in range(0, len(obs_list), BATCH):
         batch = obs_list[i:i+BATCH]
-        enc = tok(batch, return_tensors="pt", padding=True, truncation=True,
+        prompts = [PROMPT_TMPL.format(obs=o) for o in batch]
+        enc = tok(prompts, return_tensors="pt", padding=True, truncation=True,
                   max_length=MAXLEN).to(device)
         hs = model(**enc).hidden_states                 # tuple: 层数+1
         h = hs[LAYER]                                    # BiPACE用倒数第8层 [B,T,H]
-        mask = enc.attention_mask.unsqueeze(-1).float()  # [B,T,1]
-        pooled = (h*mask).sum(1) / mask.sum(1).clamp(min=1)  # 对token做mask均值池化 = f(s)
+        # mask = enc.attention_mask.unsqueeze(-1).float()  # [B,T,1]
+        # pooled = (h*mask).sum(1) / mask.sum(1).clamp(min=1)  # 对token做mask均值池化 = f(s)
+        pooled = h[:, -1, :]  # 简化: 不mask, 直接对token均值池化 = f(s)
         pooled = torch.nn.functional.normalize(pooled.float(), dim=-1)  # phi=f/||f||
         vecs.append(pooled.cpu().numpy())
     return np.concatenate(vecs, 0)
