@@ -80,7 +80,8 @@ def build():
     for _ in range(N_TRAJ):
         p1_pos, p2_pos = random.sample(range(T_STEP), 2)
         p1a, p2a = random.randint(0,1), random.randint(0,1)
-        R = 0.5*(p1a==0) + 0.5*(p2a==0)
+        # 关键: P1正确动作=0, P2正确动作=1(相反). 压缩把P1/P2混成一组时两者抵消→信用错, 才测得出伤害
+        R = 0.5*(p1a==0) + 0.5*(p2a==1)
         for t in range(T_STEP):
             if t == p1_pos:   lb, ip, a = 0, True,  p1a
             elif t == p2_pos: lb, ip, a = 1, False, p2a
