@@ -2,7 +2,7 @@
 
 ## 一. 目的
 
-我做了三条线的文献核实、并基于 3060（12G）小算力、Qwen2.5-7B-Instruct 模型判断其可行性。**结论**：真正的瓶颈不是"压缩空间难分组"，而是"**memory 表示的保真度**"—。
+我做了三条线的文献核实、并基于 3060（12G）小算力、Qwen2.5-7B-Instruct 模型判断其可行性。**结论**：真正的瓶颈不是"压缩空间难分组"，而是"**memory 表示的保真度**"。
 
 ---
 
@@ -41,7 +41,7 @@
 ### 2.3 隐空间/bisimulation 线（度量的理论支撑）
 DBC (ICLR'21, 2006.10742)、DeepMDP (ICML'19)、Markov State Abstractions (NeurIPS'21)、MICo/bisimulation 度量 (Castro'21)、CBM (2302.12003)。
 
-### 2.4 研究历程与两个创新点（诚实版）
+### 2.4 研究历程与两个创新点
 
 **一路是怎么走到这的：**
 
@@ -51,7 +51,7 @@ DBC (ICLR'21, 2006.10742)、DeepMDP (ICML'19)、Markov State Abstractions (NeurI
   - HGPO（空位二）：*"…develop a better adaptive weighting scheme for advantage aggregation from hierarchical groups by considering the uncertainty of the advantage estimate in each hierarchical group."*（考虑不确定性的自适应聚合权重）。
   - BiPACE：*"…extending the bisimulation-guided grouping to agents that compress history into a memory module (where direct observation hashing is intractable)…"*
 - **我的切入**：解决"历史压缩进 memory 后，如何在压缩表示空间做分组信用分配"。
-- **粗略实验的意外转折（诚实）**：我本以为难点是"压缩空间难分组"；但实验显示——**只要 memory 压得准（忠实），分组反而更准**（可分性 0.52→0.92），是**粗糙压缩**才失效。→ 真正的枢纽是**压缩保真度**；定位从"造新度量"精修为"**忠实压缩 + 对不完美 memory 鲁棒的分组信用分配**"。
+- **粗略实验的意外转折**：我本以为难点是"压缩空间难分组"；但实验显示——**只要 memory 压得准（忠实），分组反而更准**（可分性 0.52→0.92），是**粗糙压缩**才失效。→ 真正的枢纽是**压缩保真度**；定位从"造新度量"精修为"**忠实压缩 + 对不完美 memory 鲁棒的分组信用分配**"。
 
 **两个创新点（占的都是同一团队 Bo An / Lang Feng 自己留的 future work）：**
 
@@ -60,7 +60,7 @@ DBC (ICLR'21, 2006.10742)、DeepMDP (ICML'19)、Markov State Abstractions (NeurI
 | ① | 压缩历史场景下、按 **memory embedding 相似度的软分组信用分配** | BiPACE + HGPO 空位一 | 核心 |
 | ② | **不确定性/保真度感知的自适应聚合**，与①结合 | HGPO 空位二 | 可结合、待验证 |
 
-> **杀手锏**：这两点不是我自封的空白，而是 GiGPO→HGPO→BiPACE 这条线**同一批作者在自己论文里连续点名"还没做"的方向**。
+
 
 ---
 
@@ -94,10 +94,10 @@ A3 忠实压缩(oracle) AUC ≈ 0.92 （用真值标出的上界）
 2. **"压缩比不压好"成立、但有前提**：只有忠实压缩赢（A3），naive 白压（A2≈A1）。**A2→A3 的 0.56→0.92 鸿沟＝方法要吃的空间**。
 3. **真摘要器会失败**：7B 零样本摘要经常把干扰当主体、丢任务核心（如"填邮箱"被摘成"展示促销推荐"），同处境不同变体还互相矛盾。
 
-⚠️ **一处必须诚实标注的表示敏感性**：A3 的 0.92 用的是 **mean 池化**；若换成 **BiPACE 忠实的 last-token（末 token）**，短压缩文本会坍缩成一个簇（cluster_probe 证实）。两种读法都成立、但含义不同——(i) BiPACE 自己的末-token 表示在压缩 memory 上**失效**（正是它 future work 的难点）；(ii) 换个池化又能把信息捞回（说明信息**没丢**、是表示看不见）。**所以合成层只能声称"方向 + 有空间"，压缩的确切增益必须由 M1（真 memory 表示）来定**。
+⚠️ **一敏感性**：A3 的 0.92 用的是 **mean 池化**；若换成 **BiPACE 忠实的 last-token（末 token）**，短压缩文本会坍缩成一个簇（cluster_probe 证实）。两种读法都成立、但含义不同——(i) BiPACE 自己的末-token 表示在压缩 memory 上**失效**（正是它 future work 的难点）；(ii) 换个池化又能把信息捞回（说明信息**没丢**、是表示看不见）。**所以合成层只能声称"方向 + 有空间"，压缩的确切增益必须由 M1（真 memory 表示）来定**。
 
 ### 4.4 结论
-合成 embedding 探针**测不准**这个问题——我们先后做了7 个测量假象（池化方式、prompt 包裹、处境难度、奖励泄漏、短文本表示坍缩、理想 vs 真实压缩、摘要器质量），每一个都能把结论翻面。**可信的结论只能来自真系统**（见第 6 节）。
+合成 embedding 探针**测不准**这个问题——先后做了7 个测量假象（池化方式、prompt 包裹、处境难度、奖励泄漏、短文本表示坍缩、理想 vs 真实压缩、摘要器质量），每一个都能把结论翻面。**可信的结论只能来自真系统**（见第 6 节）。
 
 ---
 
@@ -157,16 +157,15 @@ A3 忠实压缩(oracle) AUC ≈ 0.92 （用真值标出的上界）
 group-based RL 更新（GRPO / GiGPO 家族）
 ```
 
-一句话看图：**压缩(①) → 软分组(②) → 保真度加权(③, 你独有) → 算 CA 优势(④)**；步1–3 分别对应 BiPACE、HGPO 的三个 future work 空位，步4 是 CA 本体。
+一句话看图：**压缩(①) → 软分组(②) → 保真度加权(③) → 算 CA 优势(④)**；步1–3 分别对应 BiPACE、HGPO 的三个 future work 空位，步4 是 CA 本体。
 
 ---
 
 ## 6. 预想实验
 
 **verl-agent 真 memory 表示测法**（详见 `plan_verl_agent_memory.md`）：
-- 用 agent 部署时**真实产出的 memory 表示**（不是我合成的摘要），在 ALFWorld/WebShop 上跑少量 rollout（仅推理、4bit、我的 12G 能承受）；
+- 用 agent 部署时**真实产出的 memory 表示**（不是我合成的摘要），在 ALFWorld/WebShop 上跑少量 rollout（仅推理、4bit、3060可以跑）；
 - 把已写好的 sep-AUC / CA-Acc 诊断套到真 memory 表示上；
-- 判据：真 memory 上可分性高 → 修正后的故事稳、可进 RL 小实验；低 → 抓手 (a)/(b) 有更强动机。
 
 ---
 
@@ -186,7 +185,3 @@ group-based RL 更新（GRPO / GiGPO 家族）
 
 ## 8. 可行性 & 风险
 
-- **算力**：主战场用合成/推理测量（12G 可跑）；开放环境 RL 训练不现实，作为后续。
-- **时间线**：ICLR 2027 截稿 ~2026-09；完整完成 ~30% 把握，**可发表的初步（诊断+基准+轻方法）~70%**。
-- **最大风险**：被 BiPACE/Memory-R2 抢点 → 用"压缩 memory × 任务动作 credit × 开放环境"的交集 + 鲁棒性角度做差异化。
-- **诚实基调**：合成探针不作为论文证据，只作为 landscape 勘探；论文证据来自真系统。
