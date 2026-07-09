@@ -122,9 +122,9 @@ A3 忠实压缩(oracle) AUC ≈ 0.92 （用真值标出的上界）
 3. **动作反事实（借 BiPACE 的 PACE）**：软组内按执行动作拆分算 Q̂−V̂，隔离动作专属信用。
 4. **多粒度融合**：episode 级(GRPO) + memory 组级(本方法) + 动作级(PACE)，用不确定性自适应权重融合——等于把 HGPO 的层级从"历史步数"迁到"**memory 相似度空间**"。
 
-**候选方法名**：*Memory-space Uncertainty-aware Soft Credit Assignment*——在压缩 memory 表示上按相似度软分组，按**压缩保真度 / 估计不确定性**自适应加权聚合优势。**一举吃下 BiPACE 与 HGPO 各自的 future work 空位。**
+**候选方法名**：*Memory-space Uncertainty-aware Soft Credit Assignment*——在压缩 memory 表示上按相似度软分组，按**压缩保真度 / 估计不确定性**自适应加权聚合优势。
 
-**方法流程（每一步对应一个被点名的 future work 空位）：**
+**方法流程：**
 
 ```
 观测 oₜ   （开放环境：每步近乎唯一 → 原始精确分组会坍缩）
