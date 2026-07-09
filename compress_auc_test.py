@@ -56,15 +56,25 @@ tok.padding_side="left"; tok.truncation_side="left"
 bnb=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type="nf4",bnb_4bit_compute_dtype=torch.float16)
 model=AutoModelForCausalLM.from_pretrained(MODEL,quantization_config=bnb,device_map={"":0}).eval()
 
+PROMPT_TMPL="你是一个网页/桌面操作智能体。当前界面观测如下：\n{obs}\n\n请判断此刻应采取的操作。操作："
+
 @torch.no_grad()
-def embed(texts):
-    """mean池化(对内容token做mask均值)=BiPACE的 f(s), 归一化. 不套prompt模板, 避免脚手架淹没短文本"""
+def embed(texts, pool):
+    """pool='lasttok' = BiPACE忠实(套agent prompt, 取final prompt token=决策位, L2归一)
+       pool='mean'    = 对内容token做mask均值(不套模板). 两种对照, 揭示表示敏感性."""
     vecs=[]
     for i in range(0,len(texts),BATCH):
-        enc=tok(texts[i:i+BATCH],return_tensors="pt",padding=True,truncation=True,max_length=MAXLEN).to(device)
+        if pool=="lasttok":
+            batch=[PROMPT_TMPL.format(obs=o) for o in texts[i:i+BATCH]]
+        else:
+            batch=list(texts[i:i+BATCH])
+        enc=tok(batch,return_tensors="pt",padding=True,truncation=True,max_length=MAXLEN).to(device)
         h=model(**enc,output_hidden_states=True).hidden_states[LAYER]
-        mask=enc.attention_mask.unsqueeze(-1).float()
-        pooled=(h*mask).sum(1)/mask.sum(1).clamp(min=1)
+        if pool=="lasttok":
+            pooled=h[:,-1,:]                                    # 左pad → 末位=最后一个真token=决策位
+        else:
+            mask=enc.attention_mask.unsqueeze(-1).float()
+            pooled=(h*mask).sum(1)/mask.sum(1).clamp(min=1)
         vecs.append(torch.nn.functional.normalize(pooled.float(),dim=-1).cpu().numpy())
     return np.concatenate(vecs,0)
 
@@ -101,41 +111,45 @@ def make_dataset_comp(C):
     return obs,np.array(lab)
 
 Cs=C_LEVELS if MODE=="cheap" else [None]
-res_raw=[]; res_comp={C:[] for C in Cs}
+POOLS=["lasttok","mean"]                         # lasttok=BiPACE忠实; mean=对照
+res_raw={p:[] for p in POOLS}; res_comp={p:{C:[] for C in Cs} for p in POOLS}
 for sd in SEEDS:
     random.seed(sd); np.random.seed(sd); torch.manual_seed(sd)
     obs_raw,lab=make_dataset_raw(U_FIX)
-    res_raw.append(sep_auc(embed(obs_raw),lab))
-    for C in Cs:
-        obs_c,lab_c=make_dataset_comp(C)
-        auc=sep_auc(embed(obs_c),lab_c); res_comp[C].append(auc)
-        tag=f"C={C:.2f}" if C is not None else "LLM摘要"
-        print(f"seed{sd} {tag} | AUC_comp={auc:.3f}  (AUC_raw={res_raw[-1]:.3f})")
+    comp_sets={C:make_dataset_comp(C) for C in Cs}          # 文本只生成一次(llm摘要贵)
+    for p in POOLS:
+        res_raw[p].append(sep_auc(embed(obs_raw,p),lab))
+        for C in Cs:
+            obs_c,lab_c=comp_sets[C]
+            res_comp[p][C].append(sep_auc(embed(obs_c,p),lab_c))
+    print(f"seed{sd} done")
 
 n=len(SEEDS)
-raw_m=np.nanmean(res_raw); raw_s=np.nanstd(res_raw,ddof=1)/np.sqrt(n)
-comp_m={C:np.nanmean(res_comp[C]) for C in Cs}; comp_s={C:np.nanstd(res_comp[C],ddof=1)/np.sqrt(n) for C in Cs}
-print(f"\n===== 均值±SEM (over {n} seeds) =====")
-print(f"AUC_raw(满观测,BiPACE今天) = {raw_m:.3f}±{raw_s:.3f}")
-for C in Cs:
-    tag=f"C={C:.2f}" if C is not None else "LLM摘要"
-    print(f"AUC_comp {tag} = {comp_m[C]:.3f}±{comp_s[C]:.3f}")
+mm=lambda x: float(np.nanmean(x)); se=lambda x: float(np.nanstd(x,ddof=1)/np.sqrt(n)) if n>1 else float("nan")
+print(f"\n===== 均值±SEM (over {n} seeds), 两种池化对照 =====")
+for p in POOLS:
+    tagp="BiPACE忠实(last-token)" if p=="lasttok" else "对照(mean池化)"
+    print(f"\n[{tagp}]  AUC_raw={mm(res_raw[p]):.3f}±{se(res_raw[p]):.3f}")
+    for C in Cs:
+        tag=f"C={C:.2f}" if C is not None else "LLM摘要"
+        print(f"  AUC_comp {tag} = {mm(res_comp[p][C]):.3f}±{se(res_comp[p][C]):.3f}")
 
 if MODE=="cheap":
-    plt.figure(figsize=(6.2,4.6))
-    plt.errorbar(C_LEVELS,[comp_m[C] for C in Cs],yerr=[comp_s[C] for C in Cs],fmt="s-",capsize=3,label="AUC_comp (compressed memory)")
-    plt.axhline(raw_m,ls="--",c="tab:red",label=f"AUC_raw (raw obs, BiPACE today)={raw_m:.2f}")
+    plt.figure(figsize=(6.6,4.7))
+    for p,fmt,col in [("lasttok","s-","tab:blue"),("mean","o-","tab:green")]:
+        yy=[mm(res_comp[p][C]) for C in Cs]; ee=[se(res_comp[p][C]) for C in Cs]
+        nm="last-token(BiPACE)" if p=="lasttok" else "mean-pool"
+        plt.errorbar(C_LEVELS,yy,yerr=ee,fmt=fmt,color=col,capsize=3,label=f"AUC_comp [{nm}]")
+        plt.axhline(mm(res_raw[p]),ls="--",color=col,alpha=.5,label=f"AUC_raw [{nm}]={mm(res_raw[p]):.2f}")
     plt.axhline(0.5,ls=":",c="gray"); plt.ylim(0.45,1.03)
-    plt.xlabel("compression rate C"); plt.ylabel("separability AUC (same vs diff situation)")
-    plt.title("Can representation still separate situations after compression?\nAUC_comp < AUC_raw = compression hurts grouping = topic ALIVE")
-    plt.legend(); plt.tight_layout(); plt.savefig("compress_auc_result.png",dpi=140); print("\n图已存 compress_auc_result.png")
+    plt.xlabel("compression rate C"); plt.ylabel("separability AUC")
+    plt.title("Representation sensitivity on compressed memory:\nBiPACE last-token vs mean-pool")
+    plt.legend(fontsize=8); plt.tight_layout(); plt.savefig("compress_auc_result.png",dpi=140)
+    print("\n图已存 compress_auc_result.png")
 
-c_last=comp_m[Cs[-1]]; gap=raw_m-c_last; gap_sem=np.hypot(raw_s,comp_s[Cs[-1]])
-print("\n===== 裁决 (看最压处) =====")
-print(f"AUC_raw={raw_m:.3f}  AUC_comp(最压)={c_last:.3f}  gap={gap:.3f}  (2SEM阈={2*gap_sem:.3f})")
-if gap>2*gap_sem and gap>0.05:
-    print("→ 【题活】: 压缩后可分性显著低于原始观测, 压缩让分组更难, 有你补的空间")
-elif c_last>=raw_m-gap_sem:
-    print("→ 【题危】: 压缩没让分组变难(甚至更好分), cos表示已够用, 你相对BiPACE增量存疑")
-else:
-    print("→ 中间地带: 有方向但没到2SEM, 加seed或用llm模式验证")
+print("\n===== 裁决 (最压处, 两种池化对照) =====")
+for p in POOLS:
+    tagp="BiPACE忠实(last-token)" if p=="lasttok" else "mean池化"
+    print(f"[{tagp}] AUC_raw={mm(res_raw[p]):.3f}  AUC_comp(最压)={mm(res_comp[p][Cs[-1]]):.3f}")
+print("判读: last-token压缩后≈0.5(坍缩)而mean明显更高 → 信息没丢、是BiPACE表示看不见 → 支持(b)鲁棒度量;")
+print("      两种池化压缩后都高 → 压缩确实恢复可分性; 都低 → 信息真丢(memory瓶颈, 偏(a))。")
