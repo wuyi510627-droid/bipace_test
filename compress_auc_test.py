@@ -9,19 +9,20 @@
 # MODE: "cheap"=按概率C抹掉区分细节(扫全C, 秒级) ; "llm"=真Qwen一句话摘要(单点, 慢, 改小N_VAR/SEEDS)
 # 运行: python compress_auc_test.py
 
-import random, string
+import random, string, sys
 import numpy as np, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
 
 MODEL="/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"; LAYER=-8; BATCH=8; MAXLEN=384
-MODE="cheap"                    # "cheap" 扫全C ; "llm" 真摘要单点
+MODE = sys.argv[1] if len(sys.argv)>1 else "cheap"   # 用法: python compress_auc_test.py [cheap|llm]
 U_FIX=1.0                       # 满观测(每步唯一)下测压缩
 C_LEVELS=[0.0,0.25,0.5,0.75,1.0]
-M_CANON=10; N_VAR=30            # 10个处境, 每个30个表面变体; llm模式请改小(如8)
+M_CANON=10
+N_VAR = 8 if MODE=="llm" else 30     # llm每条要生成摘要, 自动减量
 MAX_DISTRACTORS=24
-SEEDS=list(range(5))            # llm模式请改成 [0]
+SEEDS = [0] if MODE=="llm" else list(range(5))
 SUMM_TMPL="用一句话概括下面界面此刻要完成的操作，忽略广告、时间戳、导航等无关信息：\n{obs}\n一句话概括："
 device="cuda" if torch.cuda.is_available() else "cpu"
 
