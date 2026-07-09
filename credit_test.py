@@ -18,12 +18,13 @@ LAYER   = -8
 PROMPT_TMPL = "你是一个网页/桌面操作智能体。当前界面观测如下：\n{obs}\n\n请判断此刻应采取的操作。操作："
 U_LEVELS = [0.0, 0.25, 0.5, 0.75, 1.0]
 MAX_DISTRACTORS = 24
-N_TRAJ = 400         # 轨迹数(每条=1个关键步; 加大是为了压方差)
+N_TRAJ = 150         # 轨迹数(每条=1个关键步). 注意: 一个seed内所有关键步被同一分组结构耦合,
+                     #        有效样本≈seed数不是轨迹数 → 压方差要靠加seed, 不是加N_TRAJ
 T_STEP = 6           # 每条轨迹步数
-TEMP = 0.5           # BiPACE软分组的温度(对z标准化后的相似度)
+EPS = 0.15           # BiPACE贪心余弦聚类阈值(与survival_test一致, 忠实实现)
 BATCH = 8
 MAXLEN = 384
-SEEDS = [0, 1, 2]    # 多seed各跑一遍取均值±标准差, 看曲线稳不稳
+SEEDS = list(range(6))   # 6个seed: 用标准误SEM=std/√n判显著, seed是真正的采样单位
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # 10个处境: index0=P1(要测的关键处境), index1=P2(混淆处境), 2..9=填充
@@ -108,17 +109,25 @@ def hard_qv(keys, act, ret):
             if len(sa)>0: adv[sa] = ret[sa].mean() - v
     return adv
 
-def soft_qv(E, act, ret, temp):
-    """BiPACE: 用表示相似度做软分组(对z标准化后的cos), 优势=Q̂(s,a)-V̂(s)"""
-    S = E @ E.T
-    mu = S.mean(1,keepdims=True); sd = S.std(1,keepdims=True)+1e-6
-    Z = (S-mu)/sd; np.fill_diagonal(Z, -1e9); Z/=temp; Z -= Z.max(1,keepdims=True)
-    W = np.exp(Z); np.fill_diagonal(W, 0.0); W /= W.sum(1,keepdims=True)+1e-12
-    V = W @ ret
-    same = (act[None,:]==act[:,None]).astype(float)
-    Ws = W*same
-    Q = (Ws@ret)/(Ws.sum(1)+1e-12)
-    return Q - V
+def greedy_cosine_cluster(emb, eps):
+    """BiPACE式在线贪心聚类: 与最近质心cos距离<eps则并入, 否则新组 (同survival_test)"""
+    cents, members = [], []
+    for i, x in enumerate(emb):
+        if cents:
+            sims = np.array([c @ x for c in cents]); j = int(sims.argmax())
+            if (1 - sims[j]) < eps:
+                members[j].append(i)
+                c = emb[members[j]].mean(0); cents[j] = c/(np.linalg.norm(c)+1e-9)
+                continue
+        cents.append(x.copy()); members.append([i])
+    pred = np.empty(len(emb), int)
+    for cid, m in enumerate(members):
+        for idx in m: pred[idx] = cid
+    return pred
+
+def bipace_qv(E, act, ret, eps):
+    """忠实BiPACE: 先贪心余弦聚类得到组, 再在组内算 Q̂(s,a)-V̂(s) (认不出→单点→优势0)"""
+    return hard_qv(greedy_cosine_cluster(E, eps), act, ret)
 
 def ca_acc(adv, isp1, act):
     m=isp1; a=act[m]; d=adv[m]
@@ -138,51 +147,50 @@ for sd in SEEDS:
         E = embed(obs)
         row["GRPO"].append(  ca_acc(ret - ret.mean(),       isp1, act))  # episode级
         row["GiGPO"].append( ca_acc(hard_qv(obs,   act, ret), isp1, act))  # 精确观测分组
-        row["BiPACE"].append(ca_acc(soft_qv(E,     act, ret, TEMP), isp1, act))  # 表示软分组
+        row["BiPACE"].append(ca_acc(bipace_qv(E,   act, ret, EPS), isp1, act))  # 忠实BiPACE贪心聚类
         row["Oracle"].append(ca_acc(hard_qv(label, act, ret), isp1, act))  # 真值处境分组(上界)
         print(f"seed{sd} U={U:.2f} | Oracle={row['Oracle'][-1]:.3f} BiPACE={row['BiPACE'][-1]:.3f} "
               f"GiGPO={row['GiGPO'][-1]:.3f} GRPO={row['GRPO'][-1]:.3f}")
     for m in METHODS: allres[m].append(row[m])
 
-mean = {m: np.array(allres[m]).mean(0) for m in METHODS}   # [n_U]
-std  = {m: np.array(allres[m]).std(0)  for m in METHODS}
-print("\n===== 均值±标准差 (over %d seeds) =====" % len(SEEDS))
+n = len(SEEDS)
+mean = {m: np.array(allres[m]).mean(0)         for m in METHODS}   # [n_U]
+std  = {m: np.array(allres[m]).std(0, ddof=1)  for m in METHODS}   # 样本标准差(seed间散布)
+sem  = {m: std[m]/np.sqrt(n)                    for m in METHODS}   # 标准误(均值的不确定度)
+print(f"\n===== 均值±标准误SEM (over {n} seeds) =====")
 for i, U in enumerate(U_LEVELS):
     print(f"U={U:.2f} | " + "  ".join(
-        f"{m}={mean[m][i]:.3f}±{std[m][i]:.3f}" for m in METHODS))
+        f"{m}={mean[m][i]:.3f}±{sem[m][i]:.3f}" for m in METHODS))
 
-# ---------------- 画图 (带误差棒) ----------------
+# ---------------- 画图 (误差棒=SEM) ----------------
 U = U_LEVELS
 plt.figure(figsize=(6.2,4.6))
 style = {"Oracle":("o-","Oracle (true grouping, ceiling)"),
-         "BiPACE":("s-","BiPACE (repr. grouping)"),
+         "BiPACE":("s-","BiPACE (greedy cosine cluster)"),
          "GiGPO":("^--","GiGPO (exact hash)"),
          "GRPO":("x--","GRPO (episode)")}
 for m,(fmt,lab) in style.items():
-    plt.errorbar(U, mean[m], yerr=std[m], fmt=fmt, capsize=3, label=lab)
+    plt.errorbar(U, mean[m], yerr=sem[m], fmt=fmt, capsize=3, label=lab)
 plt.axhline(0.5, ls=":", c="gray"); plt.ylim(0.4,1.03)
 plt.xlabel("uniqueness U"); plt.ylabel("CA-Acc (credit sign correct at pivotal step)")
-plt.title("Does representation degradation HARM credit?\nBiPACE below Oracle & monotone drop = harm = topic ALIVE")
+plt.title(f"Does representation degradation HARM credit?  (mean±SEM, {n} seeds)\nBiPACE below Oracle = harm = topic ALIVE")
 plt.legend(); plt.tight_layout(); plt.savefig("credit_result.png", dpi=140)
 print("\n图已存 credit_result.png")
 
-# ---------------- 裁决 (看整条线, 不只U=1) ----------------
+# ---------------- 裁决 (SEM显著性 + 整体下滑) ----------------
 b = mean["BiPACE"]; o = mean["Oracle"]
 gap1 = o[-1] - b[-1]                                   # U=1处的差距
-gap1_err = np.hypot(std["Oracle"][-1], std["BiPACE"][-1])  # 差距的误差
+gap1_sem = np.hypot(sem["Oracle"][-1], sem["BiPACE"][-1])  # 差距的标准误
 drop = b[0] - b[-1]                                    # BiPACE从U=0到U=1掉了多少
-# 单调性: 相邻U之间下降的比例(允许小幅回弹)
-diffs = np.diff(b)
-monotone = (diffs <= 0.05).mean()                     # 越接近1越单调下滑
+diffs = np.diff(b); monotone = (diffs <= 0.05).mean() # 越接近1越单调下滑
 print("\n===== 裁决 =====")
 print(f"BiPACE曲线: {np.array2string(b, precision=3)}")
-print(f"U=1: Oracle={o[-1]:.3f} BiPACE={b[-1]:.3f} gap={gap1:.3f}±{gap1_err:.3f}")
-print(f"BiPACE整体下滑={drop:.3f}  单调度={monotone:.2f}  U=1标准差={std['BiPACE'][-1]:.3f}")
-if gap1 > 2*gap1_err and drop > 0.15 and monotone >= 0.75:
-    print("→ 【题活·稳】: gap显著超误差棒 且 BiPACE随U单调下滑. 可拿去汇报/进Tier-2")
-elif gap1 > 2*gap1_err and drop > 0.15:
-    print("→ 【题活·但曲线不够平滑】: 方向对, gap显著, 但下滑不单调; 汇报时如实标注方差")
-elif gap1 <= gap1_err:
-    print("→ 【题危】: gap被误差棒吃掉, BiPACE≈Oracle. 认真考虑换题")
+print(f"U=1: Oracle={o[-1]:.3f} BiPACE={b[-1]:.3f} gap={gap1:.3f}  (2×SEM阈={2*gap1_sem:.3f})")
+print(f"整体下滑={drop:.3f}  单调度={monotone:.2f}  seed间散布std={std['BiPACE'][-1]:.3f}")
+if gap1 > 2*gap1_sem and drop > 0.2:
+    print("→ 【题活】: 平均效应显著(gap>2SEM) 且 BiPACE随U明显下滑. 可拿去汇报/进Tier-2")
+    print("   注: 若seed间散布std仍很大, 汇报时如实说'效应稳健但单次波动大'")
+elif gap1 <= gap1_sem:
+    print("→ 【题危】: gap被标准误吃掉, BiPACE≈Oracle. 认真考虑换题")
 else:
-    print("→ 中间地带: gap存在但不够硬(<2倍误差), 加大N_TRAJ/加seed再确认")
+    print("→ 中间地带: 有方向但没到2SEM. 再加seed(seed才是采样单位)或换更难处境确认")
