@@ -1,102 +1,88 @@
-# memory_extract.py —— 骨架: 从 verl-agent 真实 rollout 抽 agent 的 memory 表示, 供诊断
-# 所有需对着 verl-agent 源码填的地方标了 TODO(M0). 填完即可跑 M1→M2.
-# 复用本仓库现成诊断: sep_auc(compress_auc_test), bipace_qv/ca_acc(credit_test).
+# memory_extract.py —— 真·memory 表示测法(基于对 verl-agent 源码的 M0 核对)
+# 架构要点(已核对源码):
+#   * 默认 SimpleMemory = 原始K-window拼接(不压缩); 压缩是官方"扩展点"(memory/README.md).
+#   * memory 注入点 = env_manager.build_text_obs() 调 self.memory.fetch() 塞进 prompt.
+#   * obs = {'text': 含历史的完整观测, 'anchor': 去历史的当前状态}  ← anchor=天生真值状态标签.
+#   * rollout 用 vLLM(不吐hidden); 无需hook —— total_batch_list 每步已存
+#       input_ids(解码=完整obs文本)/anchor_obs/responses(动作)/episode_rewards.
+#   * 表示离线再取: HF 4bit forward + mean池化(同 compress_auc_test), 12G够.
 #
-# 用法(填完TODO后): python memory_extract.py  → 产出 mem_dump.npz + 诊断打印
+# 两阶段:
+#   Phase1(在verl-agent里): 跑少量rollout, 从 total_batch_list dump 逐步 (obs_text, anchor, action, ret) → mem_records.jsonl
+#   Phase2(本脚本主体): 离线embed + 诊断. 与rollout解耦, 可反复跑.
+#
+# 压缩轴: 用默认SimpleMemory跑一次 → 再换 SummaryMemory(见 memory/README 扩展)跑一次 → 对比AUC.
 
-import numpy as np, torch
+import json, numpy as np, torch
 from collections import defaultdict
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from sklearn.metrics import roc_auc_score
 
+MODEL="/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"; LAYER=-8; BATCH=8; MAXLEN=1024
+RECORDS="mem_records.jsonl"   # Phase1 产出; 每行: {"obs_text":..., "anchor":..., "action":..., "ret":...}
+
 # ============================================================
-# 复用的诊断函数(和仓库其它脚本一致)
+# Phase 1 采集器 —— 贴进 verl-agent 的 rollout 驱动脚本里调用
 # ============================================================
+def dump_records_from_batch(total_batch_list, episode_rewards, tokenizer, out=RECORDS):
+    """
+    从 vanilla_multi_turn_loop 返回的 total_batch_list 逐步导出记录. 不改核心, 只后处理.
+    total_batch_list[env][step] 里有: input_ids, anchor_obs, responses, active_masks.
+    """
+    n=0
+    with open(out,"w") as f:
+        for env_idx, steps in enumerate(total_batch_list):
+            ret=float(episode_rewards[env_idx])
+            for rec in steps:
+                if not rec.get("active_masks", True): continue
+                obs_text=tokenizer.decode(rec["input_ids"], skip_special_tokens=True)   # 完整含memory的观测
+                anchor=rec.get("anchor_obs", None)                                      # 去历史的真值状态
+                anchor=anchor.item() if hasattr(anchor,"item") else (str(anchor) if not isinstance(anchor,str) else anchor)
+                action=tokenizer.decode(rec["responses"], skip_special_tokens=True)
+                f.write(json.dumps({"obs_text":obs_text,"anchor":str(anchor),"action":action,"ret":ret},ensure_ascii=False)+"\n")
+                n+=1
+    print(f"[Phase1] 写出 {n} 条 → {out}")
+
+# ============================================================
+# Phase 2: 离线取表示 + 诊断
+# ============================================================
+def load_model():
+    tok=AutoTokenizer.from_pretrained(MODEL)
+    if tok.pad_token is None: tok.pad_token=tok.eos_token
+    tok.padding_side="left"; tok.truncation_side="left"
+    bnb=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type="nf4",bnb_4bit_compute_dtype=torch.float16)
+    m=AutoModelForCausalLM.from_pretrained(MODEL,quantization_config=bnb,device_map={"":0}).eval()
+    return tok,m
+
+@torch.no_grad()
+def embed(texts, tok, model):
+    vecs=[]
+    for i in range(0,len(texts),BATCH):
+        enc=tok(texts[i:i+BATCH],return_tensors="pt",padding=True,truncation=True,max_length=MAXLEN).to(model.device)
+        h=model(**enc,output_hidden_states=True).hidden_states[LAYER]
+        mask=enc.attention_mask.unsqueeze(-1).float()
+        pooled=(h*mask).sum(1)/mask.sum(1).clamp(min=1)                 # mean池化 = f(s)
+        vecs.append(torch.nn.functional.normalize(pooled.float(),dim=-1).cpu().numpy())
+    return np.concatenate(vecs,0)
+
 def sep_auc(emb, labels):
-    S = emb @ emb.T; iu = np.triu_indices(len(emb), k=1)
-    same = (labels[iu[0]] == labels[iu[1]]).astype(int)
+    S=emb@emb.T; iu=np.triu_indices(len(emb),k=1)
+    same=(labels[iu[0]]==labels[iu[1]]).astype(int)
     if same.min()==same.max(): return float("nan")
-    return roc_auc_score(same, S[iu])
+    return roc_auc_score(same,S[iu])
 
-def greedy_cosine_cluster(emb, eps):
-    cents, members = [], []
-    for i, x in enumerate(emb):
-        if cents:
-            sims = np.array([c @ x for c in cents]); j = int(sims.argmax())
-            if (1 - sims[j]) < eps:
-                members[j].append(i); c = emb[members[j]].mean(0); cents[j] = c/(np.linalg.norm(c)+1e-9); continue
-        cents.append(x.copy()); members.append([i])
-    pred = np.empty(len(emb), int)
-    for cid, m in enumerate(members):
-        for idx in m: pred[idx] = cid
-    return pred
+def main():
+    recs=[json.loads(l) for l in open(RECORDS)]
+    labs_raw=[r["anchor"] for r in recs]
+    u={s:i for i,s in enumerate(sorted(set(labs_raw)))}          # anchor→整数状态id
+    lab=np.array([u[s] for s in labs_raw])
+    tok,model=load_model()
+    E=embed([r["obs_text"] for r in recs], tok, model)
+    auc=sep_auc(E,lab)
+    print(f"真memory表示 sep-AUC={auc:.3f}  样本={len(lab)} 真值状态数={lab.max()+1}")
+    print("判读: AUC高→含memory的表示按真值状态可分, '在memory表示上分组'故事稳;")
+    print("      AUC低→分不开, 需要更忠实memory或更鲁棒度量.")
+    print("压缩对比: 用 SummaryMemory 重跑 Phase1 得到 mem_records_summary.jsonl, 改 RECORDS 再跑, 对比两条 AUC.")
 
-def hard_qv(keys, act, ret):
-    adv = np.zeros(len(ret)); g = defaultdict(list)
-    for i,k in enumerate(keys): g[k].append(i)
-    for k, idx in g.items():
-        idx = np.array(idx); v = ret[idx].mean()
-        for a in set(act[idx].tolist()):
-            sa = idx[act[idx]==a]
-            if len(sa)>0: adv[sa] = ret[sa].mean() - v
-    return adv
-
-# ============================================================
-# M0/M1: 从 verl-agent 抽 (memory表示, 真值状态id, 动作, 回报)
-# ============================================================
-def rollout_and_extract(n_episodes=30, eps_cluster=0.15):
-    """
-    TODO(M0): 对照 verl-agent 源码填三处挂载点.
-    """
-    # --- TODO(M0-1): 载入 verl-agent 的 actor 模型与环境 ---
-    #   from verl_agent... import build_actor, make_env
-    #   actor = build_actor(ckpt=..., load_in_4bit=True)      # 12G: 4bit 推理
-    #   env   = make_env("alfworld")                          # 或 webshop
-    raise NotImplementedError("填 M0-1: 载入 actor 与 env")
-
-    records = []  # 每条: dict(repr=np.array, state_id=str/int, action=int, ret=float)
-    for ep in range(n_episodes):
-        obs = env.reset(); done = False; traj = []
-        while not done:
-            # --- TODO(M0-2): 构建 memory 输入 & 取隐状态 ---
-            #   memory_text = agent.build_memory(traj_history)   # verl-agent 里 history/memory 的构建函数
-            #   out = actor.forward(memory_text, output_hidden_states=True)
-            #   h = out.hidden_states[LAYER]                      # [T,H]
-            #   memory_repr = normalize(mean_pool_over_memory_tokens(h))  # = f(memory), 归一化
-            #   action = actor.act(out)
-            # --- TODO(M0-3): 取环境底层真值状态当标签(供AUC) ---
-            #   state_id = env.underlying_state_id()             # ALFWorld 有可读状态
-            memory_repr = None; state_id = None; action = None   # <- 由上面填出
-            traj.append(dict(repr=memory_repr, state_id=state_id, action=action))
-            obs, reward, done, info = env.step(action)
-        ep_return = info["episode_return"]                       # TODO(M0): 取该 episode 回报
-        for r in traj: r["ret"] = ep_return; records.append(r)
-
-    # 打包
-    E   = np.stack([r["repr"] for r in records]).astype(float)
-    sid = np.array([r["state_id"] for r in records])
-    act = np.array([r["action"] for r in records])
-    ret = np.array([r["ret"] for r in records], float)
-    # 把 state_id 映射成整数标签
-    u = {s:i for i,s in enumerate(sorted(set(sid.tolist())))}
-    lab = np.array([u[s] for s in sid])
-    np.savez("mem_dump.npz", E=E, lab=lab, act=act, ret=ret)
-    return E, lab, act, ret
-
-# ============================================================
-# M2: 在真 memory 表示上跑诊断
-# ============================================================
-def diagnose(E, lab, act, ret, eps_cluster=0.15):
-    auc = sep_auc(E, lab)
-    pred = greedy_cosine_cluster(E, eps_cluster)
-    # 分组信用分配质量: 用真值状态分组(上界) vs memory聚类分组
-    def ca_sign_match(adv):
-        # 无合成"关键步", 这里粗看: memory聚类 vs 真值分组 给出的优势符号一致率
-        return float((np.sign(adv) == np.sign(hard_qv(lab, act, ret))).mean())
-    match = ca_sign_match(hard_qv(pred, act, ret))
-    print(f"真memory表示: sep-AUC={auc:.3f}  (高→同处境可分, 修正故事稳; 低→有损, 抓手a/b有据)")
-    print(f"memory聚类 vs 真值分组 的优势符号一致率={match:.3f}")
-    print(f"簇数={pred.max()+1}  样本数={len(lab)}  真值处境数={lab.max()+1}")
-
-if __name__ == "__main__":
-    E, lab, act, ret = rollout_and_extract()
-    diagnose(E, lab, act, ret)
+if __name__=="__main__":
+    main()
