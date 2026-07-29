@@ -1,31 +1,41 @@
-# tmaze_text_test.py —— 文本版 Passive T-Maze:证明"truncate 会崩、压缩不崩"(打脸 G2PO 的地基图)
+# tmaze_text_test.py —— 文本版 Passive T-Maze:一次证完三条主张
 # ─────────────────────────────────────────────────────────────────────────
 # 任务(照 Ni et al. 2023 的 Passive T-Maze 搬成文本):
 #   第0步 = 起点, 墙上给一次线索"宝藏在上/下侧";  中间 = 空白走廊(纯 filler);
 #   末尾 = 岔路口, 必须凭记忆选对上/下。 走廊越长 L, 线索离决策点越远。
 #   记忆长度 = L, 信用分配长度 = 1(纯记忆诊断)。
 #
-# 四条对照(在决策点问模型"宝藏在上还是下", 看选对率):
-#   no_mem   : 只给当前(岔路口)观测        → 无线索, ≈50% 瞎猜
-#   trunc-k  : 只留最近 k 步(=GraphGPO/G2PO 的招) → L>k 时线索滑出窗口, ≈50%
-#   full     : 全历史                        → 线索在, ≈100%(但 token 随 L 爆炸)
-#   vtree(B) : 按"信念跳变"留决定性步、丢空白走廊 → 线索在、token 极省, ≈100%
+# 三条主张:
+#   ① truncate 会崩 : trunc-k 在 L>k 断崖到 ~0.5(线索滑出窗口)  = 打脸 G2PO/GraphGPO 的地基图
+#   ② 压缩不崩     : vtree 一路 ~1.0(决定性步被保住)
+#   ③ 压缩省 token : vtree 的 token 数是平的, full 随 L 线性爆炸 ← 动机图的另一半
+#      (③ 才是 B 的动机命门: Ni 2023 已证"记忆长"逼不出压缩, 只有 token 硬上限能)
 #
-# 期望图: X=走廊长L, Y=选对率。 trunc-k 在 L>k 断崖, full/vtree 一路平。
-# ⚠️ Passive 是"送分题"(该留的步太明显), 只证"必须压+管线通"; B 的真本事考在 Active/Key-to-Door。
+# 六条对照臂:
+#   no_mem    : 只给当前(岔路口)观测           → 无线索, ≈50% 瞎猜
+#   trunc-k   : 只留最近 k 步(=GraphGPO/G2PO)  → L>k 时线索滑出, ≈50%
+#   full      : 全历史                         → ≈100%, 但 token 随 L 线性爆炸
+#   vtree_val : B, 按【价值】(能否成功)跳幅留步  ← 主方法(定版决定1: 尺子=价值)
+#   vtree_bel : B, 按【信念】(宝藏在哪)跳幅留步  ← 对照臂, 看两种信号是否等价
+#
+# ⚠️ Passive 是"送分题"(该留的步只有一个、太明显), 只证"必须压+管线通";
+#    B 的真本事考在 Active/Key-to-Door(多个候选关键步里挑对的)。
 # 运行(有 GPU+模型的机器): python tmaze_text_test.py
 # ─────────────────────────────────────────────────────────────────────────
 
 import random, numpy as np, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
-MODEL="/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"; MAXLEN=1024
-LS=[1,2,4,8,16]              # 走廊长度扫描
+MODEL="/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"
+MAXLEN=1024; BATCH=16       # BATCH: 前缀信号一次批量算完(vtree 每集要算 L+1 个前缀, 不批量会很慢)
+LS=[1,2,4,8,16]             # 走廊长度扫描
 TRUNC_KS=[2,8]              # 两个 truncate 窗口(2=GraphGPO 的"最近2步")
-N_EPI=20                    # 每个 L 跑多少集
-JUMP_TAU=0.25              # vtree: 信念跳幅 > 此值的步判为"决定性步", 保留
-SEED=0
+N_EPI=100                   # 每个 L 跑多少集(原为20, 噪声太大; 100 起步)
+JUMP_TAU=0.25               # vtree: 跳幅 > 此值的步判为"决定性步", 保留
+SEEDS=[0,1,2]               # 多 seed, 出误差棒
 device="cuda" if torch.cuda.is_available() else "cpu"
+
+ARMS=["no_mem","full","vtree_val","vtree_bel"]+[f"trunc{k}" for k in TRUNC_KS]
 
 # ── 文本版 Passive T-Maze:生成一集的观测序列 ──────────────────────────────
 SIDES=["上","下"]
@@ -44,72 +54,116 @@ if tok.pad_token is None: tok.pad_token=tok.eos_token
 tok.padding_side="left"; tok.truncation_side="left"
 bnb=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type="nf4",bnb_4bit_compute_dtype=torch.float16)
 model=AutoModelForCausalLM.from_pretrained(MODEL,quantization_config=bnb,device_map={"":0}).eval()
-UP_ID=tok("上",add_special_tokens=False).input_ids[0]
+UP_ID  =tok("上",add_special_tokens=False).input_ids[0]
 DOWN_ID=tok("下",add_special_tokens=False).input_ids[0]
+YES_ID =tok("是",add_special_tokens=False).input_ids[0]
+NO_ID  =tok("否",add_special_tokens=False).input_ids[0]
 
 @torch.no_grad()
-def p_up(mem_text):     # 给一份记忆, 返回模型认为"宝藏在上"的概率
-    prompt=(f"你是走迷宫的智能体。你目前掌握的记忆如下:\n{mem_text}\n"
-            f"问:宝藏在上侧还是下侧通道?只回答一个字:上 或 下。\n答:")
-    enc=tok(prompt,return_tensors="pt",padding=True,truncation=True,max_length=MAXLEN).to(device)
-    logits=model(**enc).logits[:,-1,:].float()
-    return torch.softmax(logits[:,[UP_ID,DOWN_ID]],dim=-1)[0,0].item()
+def probe(prompts, id_a, id_b):     # 批量问二选一, 返回 P(选项a) 数组
+    out=[]
+    for i in range(0,len(prompts),BATCH):
+        enc=tok(prompts[i:i+BATCH],return_tensors="pt",padding=True,
+                truncation=True,max_length=MAXLEN).to(device)
+        lg=model(**enc).logits[:,-1,:].float()          # 末位=下一个token分布
+        out.extend(torch.softmax(lg[:,[id_a,id_b]],dim=-1)[:,0].cpu().tolist())
+    return np.array(out)
 
-def pred_side(mem_text):  # 决策:上 or 下
-    return "上" if p_up(mem_text)>=0.5 else "下"
+_HEAD="你是走迷宫的智能体。你目前掌握的记忆如下:\n{}\n"
+def belief(mems):   # 信念: 宝藏在上的概率(也是"决策"本身用的量)
+    return probe([_HEAD.format(m)+"问:宝藏在上侧还是下侧通道?只回答一个字:上 或 下。\n答:" for m in mems],
+                 UP_ID, DOWN_ID)
+def value(mems):    # 价值: 能否成功找到宝藏的概率(定版决定1 的主信号)
+    return probe([_HEAD.format(m)+"问:你能成功找到宝藏吗?只回答一个字:是 或 否。\n答:" for m in mems],
+                 YES_ID, NO_ID)
 
-# ── 四种记忆在决策点的构造 ─────────────────────────────────────────────────
-def mem_full(obs):            return "\n".join(obs)                              # 全历史
-def mem_trunc(obs,k):         return "\n".join(obs[max(0,len(obs)-k):])          # 最近 k 步
-def mem_nomem(obs):           return obs[-1]                                     # 只当前观测
-def mem_vtree(obs):           # B: 按信念跳变留决定性步, 丢空白走廊, 末尾岔路口必留
-    keep=[]; prev=0.5                                                            # 先验 0.5(还不知道上下)
+# ── 各臂的记忆构造 ───────────────────────────────────────────────────────
+def mem_full(obs):     return "\n".join(obs)                            # 全历史
+def mem_trunc(obs,k):  return "\n".join(obs[max(0,len(obs)-k):])        # 最近 k 步
+def mem_nomem(obs):    return obs[-1]                                   # 只当前观测
+
+def mem_vtree(obs, sig_fn):
+    """B: 按信号跳幅留决定性步, 丢空白走廊, 末尾岔路口必留.
+    注: 第0步【不】无条件保留 —— 让它凭跳幅自己入选(线索恰在第0步, 硬留=作弊)."""
+    prefixes=["\n".join(obs[:t+1]) for t in range(len(obs))]
+    s=sig_fn(prefixes)                                                  # 一次批量算完所有前缀
+    keep=[]; prev=0.5                                                   # 先验 0.5(还不知道上下/成败)
     for t in range(len(obs)):
-        b=p_up("\n".join(obs[:t+1]))
-        if t==0 or abs(b-prev)>=JUMP_TAU: keep.append(t)                         # 信念猛跳=决定性步
-        prev=b
-    if (len(obs)-1) not in keep: keep.append(len(obs)-1)                         # 决策点必留
+        if abs(s[t]-prev)>=JUMP_TAU: keep.append(t)                     # 跳幅猛跳=决定性步
+        prev=s[t]
+    if (len(obs)-1) not in keep: keep.append(len(obs)-1)                # 决策点必留
     return "\n".join(obs[t] for t in sorted(set(keep)))
 
-# ── 主流程 ──────────────────────────────────────────────────────────────
-def run():
-    random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
-    arms=["no_mem","full","vtree"]+[f"trunc{k}" for k in TRUNC_KS]
-    acc={a:[] for a in arms}
+def ntok(text): return len(tok(text,add_special_tokens=False).input_ids)
+
+# ── 单个 seed 的一轮 ─────────────────────────────────────────────────────
+def run_seed(seed):
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    acc={a:[] for a in ARMS}; tkn={a:[] for a in ARMS}
     for L in LS:
-        hit={a:0 for a in arms}
+        hit={a:0 for a in ARMS}; tot={a:0 for a in ARMS}
         for _ in range(N_EPI):
             goal,obs=gen_episode(L)
-            mems={"no_mem":mem_nomem(obs),"full":mem_full(obs),"vtree":mem_vtree(obs)}
+            mems={"no_mem":mem_nomem(obs), "full":mem_full(obs),
+                  "vtree_val":mem_vtree(obs,value), "vtree_bel":mem_vtree(obs,belief)}
             for k in TRUNC_KS: mems[f"trunc{k}"]=mem_trunc(obs,k)
-            for a in arms:
-                if pred_side(mems[a])==goal: hit[a]+=1
-        for a in arms: acc[a].append(hit[a]/N_EPI)
-        print(f"L={L:>2}: " + "  ".join(f"{a}={acc[a][-1]:.2f}" for a in arms))
-    return arms,acc
+            names=list(mems)
+            p=belief([mems[n] for n in names])                          # 决策一律问上/下(任务本身)
+            for n,pu in zip(names,p):
+                if ("上" if pu>=0.5 else "下")==goal: hit[n]+=1
+                tot[n]+=ntok(mems[n])
+        for a in ARMS: acc[a].append(hit[a]/N_EPI); tkn[a].append(tot[a]/N_EPI)
+        print(f"  L={L:>2}: " + "  ".join(f"{a}={acc[a][-1]:.2f}({tkn[a][-1]:.0f}tk)" for a in ARMS))
+    return acc,tkn
 
+# ── 主流程 ──────────────────────────────────────────────────────────────
 if __name__=="__main__":
-    arms,acc=run()
-    print("\n===== 选对率 vs 走廊长 L =====")
-    print("L\t" + "\t".join(arms))
+    A={a:[] for a in ARMS}; T={a:[] for a in ARMS}
+    for s in SEEDS:
+        print(f"seed {s}:")
+        acc,tkn=run_seed(s)
+        for a in ARMS: A[a].append(acc[a]); T[a].append(tkn[a])
+    # 跨 seed 汇总
+    Am={a:np.mean(A[a],0) for a in ARMS}; As={a:np.std(A[a],0) for a in ARMS}
+    Tm={a:np.mean(T[a],0) for a in ARMS}; Ts={a:np.std(T[a],0) for a in ARMS}
+
+    print(f"\n===== 选对率 (mean±std over {len(SEEDS)} seeds, N={N_EPI}/seed) =====")
+    print("L\t" + "\t".join(ARMS))
     for i,L in enumerate(LS):
-        print(f"{L}\t" + "\t".join(f"{acc[a][i]:.2f}" for a in arms))
+        print(f"{L}\t" + "\t".join(f"{Am[a][i]:.2f}±{As[a][i]:.2f}" for a in ARMS))
+    print("\n===== 记忆 token 数 =====")
+    print("L\t" + "\t".join(ARMS))
+    for i,L in enumerate(LS):
+        print(f"{L}\t" + "\t".join(f"{Tm[a][i]:.0f}" for a in ARMS))
+
     try:
         import matplotlib.pyplot as plt
-        plt.figure(figsize=(6.4,4.6))
-        sty={"no_mem":("o:","gray"),"full":("s-","tab:green"),"vtree":("D-","tab:blue"),
-             "trunc2":("^--","tab:red"),"trunc8":("v--","tab:orange")}
-        for a in arms:
-            fmt,c=sty.get(a,("x-","black")); plt.plot(LS,acc[a],fmt,color=c,label=a)
-        plt.axhline(0.5,ls=":",c="k",alpha=.4,label="瞎猜")
-        plt.xlabel("走廊长度 L(=记忆长度)"); plt.ylabel("决策点选对率"); plt.ylim(0.4,1.03)
-        plt.title("文本版 Passive T-Maze:truncate 崩、压缩不崩")
-        plt.legend(); plt.tight_layout(); plt.savefig("tmaze_result.png",dpi=140)
-        print("\n图已存 tmaze_result.png")
+        # 英文标签: 避免 CJK 字体缺失的 warning, 且论文图本来就要英文
+        LBL={"no_mem":"no memory","full":"full history","vtree_val":"vtree (value)",
+             "vtree_bel":"vtree (belief)","trunc2":"trunc-2","trunc8":"trunc-8"}
+        STY={"no_mem":("o:","gray"),"full":("s-","tab:green"),"vtree_val":("D-","tab:blue"),
+             "vtree_bel":("d--","tab:cyan"),"trunc2":("^--","tab:red"),"trunc8":("v--","tab:orange")}
+        fig,ax=plt.subplots(1,2,figsize=(11,4.4))
+        for a in ARMS:
+            fmt,c=STY[a]
+            ax[0].errorbar(LS,Am[a],yerr=As[a],fmt=fmt,color=c,label=LBL[a],capsize=3)
+            ax[1].errorbar(LS,Tm[a],yerr=Ts[a],fmt=fmt,color=c,label=LBL[a],capsize=3)
+        ax[0].axhline(0.5,ls=":",c="k",alpha=.4); ax[0].set_ylim(0.35,1.05)
+        ax[0].set_xlabel("corridor length L (= memory span)"); ax[0].set_ylabel("decision accuracy")
+        ax[0].set_title("(a) truncation breaks, compression does not")
+        ax[1].set_xlabel("corridor length L (= memory span)"); ax[1].set_ylabel("memory tokens")
+        ax[1].set_title("(b) full history blows up, vtree stays flat")
+        ax[0].legend(fontsize=8); ax[1].legend(fontsize=8)
+        plt.tight_layout(); plt.savefig("tmaze_result.png",dpi=140)
+        print("\n图已存 tmaze_result.png  (左=准确率, 右=token数)")
     except Exception as e:
         print("画图跳过:",e)
-    print("\n判读: trunc-k 在 L>k 掉到 ~0.5(线索滑出窗口), 而 full/vtree 保持 ~1.0")
-    print("      → truncate(G2PO的招)在'必须长程记忆'的任务上崩; 压缩(B)保住决定性线索、token 却极省 → memory 压缩的存在理由成立。")
+
+    print("\n判读(三条一起看):")
+    print("  ① trunc-k 在 L>k 掉到 ~0.5 → truncate(G2PO/GraphGPO的招)在'必须长程记忆'的任务上崩;")
+    print("  ② vtree 一路 ~1.0        → 压缩保住了决定性线索;")
+    print("  ③ full 的 token 随 L 线性涨、vtree 平 → 压缩真的解决 token 硬上限(B 的动机命门).")
+    print("  ④ vtree_val vs vtree_bel → 若两条重合, 说明 Passive 下'价值信号'与'信念信号'等价.")
 
 # ============ 下一步(Active 版, 留作 B 的真本事图) ============
 # 把 gen_episode 改成 Active: 起点在 oracle 右边一格, 线索要"先走回去读"→ CA 长度也变 T;
