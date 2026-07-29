@@ -70,6 +70,9 @@ rng = random.Random(SEED)
 summ = TruncSummarizer()
 pairs = {"摘要": [0, 0], "折叠": [0, 0]}      # [一致数, 总数]
 dv = {"摘要": [], "折叠": []}                  # 顺带记数值差, 作对照
+per_traj = {"摘要": [], "折叠": []}            # 每条轨迹单独的 c —— 用来看固定值合不合适
+by_len = {"短": {"摘要": [0, 0], "折叠": [0, 0]},   # 按观测长度分层
+          "长": {"摘要": [0, 0], "折叠": [0, 0]}}
 
 for n in range(N_TRAJ):
     task, steps = gen_traj(rng)
@@ -88,12 +91,20 @@ for n in range(N_TRAJ):
     dv["摘要"].append(np.abs(full - sm).mean()); dv["折叠"].append(np.abs(full - fd).mean())
 
     # 同一条轨迹内, 所有步对的跳幅排序是否一致
+    med = np.median([len(x) for x in steps])
+    loc = {"摘要": [0, 0], "折叠": [0, 0]}
     for i, j in itertools.combinations(range(T), 2):
         ref = np.sign(d_full[i] - d_full[j])
         if ref == 0: continue
+        bucket = "长" if (len(steps[i]) + len(steps[j])) / 2 > med else "短"
         for name, d in (("摘要", d_sm), ("折叠", d_fd)):
-            pairs[name][1] += 1
-            if np.sign(d[i] - d[j]) == ref: pairs[name][0] += 1
+            ok = int(np.sign(d[i] - d[j]) == ref)
+            pairs[name][1] += 1; pairs[name][0] += ok
+            loc[name][1] += 1;   loc[name][0] += ok
+            by_len[bucket][name][1] += 1; by_len[bucket][name][0] += ok
+    for name in ("摘要", "折叠"):
+        if loc[name][1]:
+            per_traj[name].append(max(0.0, 2 * (loc[name][0] / loc[name][1] - 0.5)))
     if (n + 1) % 10 == 0:
         print(f"  {n+1}/{N_TRAJ} 条…", flush=True)
 
@@ -117,5 +128,36 @@ print("  (数值差小≠判断力强 —— 模型若对什么都答 0.5~0.6, �
 print(f"""
 → 把 vtree_compressor.py 里这一行改成:
    CONF = {{RES_FULL: 1.0, RES_SUMM: {res['摘要']:.2f}, RES_MERGE: {res['折叠']:.2f}}}""")
+# ── 固定值合不合适: 看散不散 ─────────────────────────────────────────
+print("\n" + "=" * 60)
+print("这个值能不能【固定】? 看它在不同样本上散不散")
+print("=" * 60)
+print(f"{'档位':<6} | {'均值':>6} | {'标准差':>7} | {'10%分位':>8} | {'90%分位':>8}")
+print("-" * 60)
+spread = {}
+for name in ("摘要", "折叠"):
+    a = np.array(per_traj[name])
+    spread[name] = a.std()
+    print(f"{name:<6} | {a.mean():>6.2f} | {a.std():>7.2f} | "
+          f"{np.percentile(a,10):>8.2f} | {np.percentile(a,90):>8.2f}")
+
+print(f"\n按观测长度分层 (中位数切分):")
+print(f"{'档位':<6} | {'短观测 c':>10} | {'长观测 c':>10} | {'差距':>6}")
+print("-" * 44)
+for name in ("摘要", "折叠"):
+    cs = {}
+    for b in ("短", "长"):
+        h, t = by_len[b][name]
+        cs[b] = max(0.0, 2 * (h / max(t, 1) - 0.5))
+    print(f"{name:<6} | {cs['短']:>10.2f} | {cs['长']:>10.2f} | {abs(cs['短']-cs['长']):>6.2f}")
+
+print("\n判读:")
+mx = max(spread.values())
+if mx < 0.15:
+    print(f"  ✅ 跨轨迹标准差 {mx:.2f} < 0.15 → 比较集中, 【固定成常数就够】.")
+else:
+    print(f"  ⚠️ 跨轨迹标准差 {mx:.2f} ≥ 0.15 → 个体差异大, 固定值只是平均数.")
+    print("     升级选项(按成本从低到高): ① 按观测长度分两档取值(见上表, 零成本);")
+    print("     ② 每个环境单独标定; ③ 按实际压缩比缩放 c_t.")
 if res["摘要"] < 0.4:
     print("\n⚠️ c_摘要 < 0.4: 摘要档保不住跳幅排序 → §2.4「三档优于两档」的论证需重新审视.")
