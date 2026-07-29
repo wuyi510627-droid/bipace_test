@@ -4,11 +4,11 @@
 #
 # 设计约束(见 落地实现方案.md §0):
 #   动机是 context 硬上限 ⇒ 压缩必须作用在 agent 决策所看的 memory 上
-#   ⇒ 必须【在线】压(边走边压) ⇒ 探针要能增量算、预算重分配要便宜、摘要不能调模型.
+#   ⇒ 必须【在线】压(边走边压) ⇒ 探针要能增量算、预算重分配要便宜、摘要要带缓存.
 #
 # 三档分辨率(= 树的三层):
 #   RES_FULL  原文一字不差            → 叶子      conf 1.0
-#   RES_SUMM  模板摘要(动作+对象)      → 中间层    conf 0.6
+#   RES_SUMM  摘要(可插拔摘要器)        → 中间层    conf 0.6
 #   RES_MERGE 连续段捏成一句           → 近根      conf 0.3
 #
 # 用法(在线):                        用法(离线, 给实验脚本):
@@ -86,25 +86,88 @@ class ScriptedProbe:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 2. 模板摘要(落地方案 D4: 不调模型)
+# 2. 摘要器(中间档) —— 可插拔, 与本方法正交
 # ══════════════════════════════════════════════════════════════════════
+# ⚠️ 定位很重要, 别搞混两件事:
+#     "这一段该压多短" = 按价值跳幅分配预算 → ★本方法的创新, 在 VTreeCompressor 里
+#     "怎么把一段话压短" = 文本压缩         → 已有成熟通用方案(LLMLingua/Selective-Context/
+#                                            直接让 LLM 摘要), 本方法【不重新发明】
+# 所以摘要器做成可换的组件: 换环境不改本方法, 只换/不换摘要器.
+# 早期版本把它写成手写正则, 那等于"每个环境都要重新实现一档", 方法就没有通用性了.
+
+class Summarizer:
+    """接口: 把 text 压到 <= budget_chars, 返回压缩后的文本. 自带缓存."""
+
+    def __init__(self):
+        self._cache: dict[tuple[str, int], str] = {}
+
+    def __call__(self, text: str, budget_chars: int) -> str:
+        key = (text, budget_chars)
+        if key not in self._cache:
+            self._cache[key] = self._summarize(text, budget_chars)
+        return self._cache[key]
+
+    def _summarize(self, text: str, budget_chars: int) -> str:
+        raise NotImplementedError
+
+
+class TruncSummarizer(Summarizer):
+    """通用兜底: 保首句主干 + 截断. 零成本、零依赖、任何环境都能用, 但质量最差.
+    默认用它跑通管线; 质量不够再换 LLMSummarizer."""
+
+    def _summarize(self, text, budget_chars):
+        s = re.sub(r"[【】\[\]()（）]", "", text.strip().replace("\n", " "))
+        core = re.split(r"[，,。;；]", s)[0]                # 首个子句 = 主干
+        if len(core) <= budget_chars:
+            return core
+        return core[:max(1, budget_chars - 1)] + "…"
+
+
+class LLMSummarizer(Summarizer):
+    """通用: 让 LLM 摘要. 换环境不用改代码 —— 这是解决通用性的默认选项.
+
+    成本可控(见 落地方案 D4 重算): 只有【落在中间档】的步需要摘要(FULL 用原文、
+    MERGE 折叠成一句都不需要), 中间档步数 <= 预算/平均摘要长, 且结果进缓存,
+    档位不变就不重算 ⇒ 每步摊销最多 1 次短生成.
+    """
+
+    PROMPT = "把下面这条 agent 观测压缩成不超过 {n} 个字, 只保留会影响任务成败的信息, 直接输出压缩结果:\n{t}\n压缩结果:"
+
+    def __init__(self, model, tok, device=None, max_new=48):
+        super().__init__()
+        import torch
+        self.torch, self.model, self.tok, self.max_new = torch, model, tok, max_new
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _summarize(self, text, budget_chars):
+        enc = self.tok(self.PROMPT.format(n=budget_chars, t=text),
+                       return_tensors="pt").to(self.device)
+        with self.torch.no_grad():
+            out = self.model.generate(**enc, max_new_tokens=self.max_new,
+                                      do_sample=False, pad_token_id=self.tok.pad_token_id)
+        s = self.tok.decode(out[0][enc.input_ids.shape[1]:], skip_special_tokens=True).strip()
+        return s[:budget_chars] if s else TruncSummarizer()._summarize(text, budget_chars)
+
+
 _VERBS = r"(拿起|放下|打开|关上|加热|清洗|切开|走到|前往|查看|搜索|点击|购买|选择|使用|放入|取出)"
 
 
-def summarize_rule(s: str, ratio: float = 0.45, min_chars: int = 8, max_chars: int = 32) -> str:
-    """抽"动作 + 对象", 丢修饰. 换环境改这一个函数即可(落地方案 §8-1).
+class RuleSummarizer(Summarizer):
+    """按环境手写的规则(此处为 ALFWorld 式中文动作句). 抽"动作+对象", 丢修饰.
 
-    ⚠️ 必须【保证压缩比】: 摘要长度上限 = ratio × 原文长度. 否则动词表匹配不上时
-       退化成"原样截断", 摘要 ≈ 原文, S 档就形同虚设 —— 三档实际塌成两档.
+    ⚠️ 【不通用】—— 换环境要重写正则. 只作为: ① 无模型时的快速原型;
+       ② 消融基线(证明"摘要器换成什么都不影响本方法的结论").
     """
-    s = s.strip().replace("\n", " ")
-    cap = max(min_chars, min(max_chars, int(len(s) * ratio)))
-    hits = re.findall(_VERBS + r"[了过]?\s*([^,，。;；]{0,12})", s)
-    if hits:
-        return "，".join(f"{v}{o}".strip() for v, o in hits)[:cap]
-    # 兜底: 抽首句主干(去掉括号标记与修饰性从句), 再按 cap 截断
-    core = re.sub(r"[【】\[\]()（）]", "", s.split("，")[0].split(",")[0])
-    return (core[:cap] + "…") if len(core) > cap else core
+
+    def _summarize(self, text, budget_chars):
+        s = text.strip().replace("\n", " ")
+        hits = re.findall(_VERBS + r"[了过]?\s*([^,，。;；]{0,12})", s)
+        if hits:
+            return "，".join(f"{v}{o}".strip() for v, o in hits)[:budget_chars]
+        return TruncSummarizer()._summarize(text, budget_chars)     # 匹配不上就退回通用兜底
+
+
+DEFAULT_SUMMARIZER = TruncSummarizer()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -117,10 +180,12 @@ class VTreeCompressor:
     """
 
     def __init__(self, probe, tok, budget: int = 512, task: str = "", v_prior: float = 0.5,
-                 min_jump: float = 0.01):
+                 min_jump: float = 0.01, summarizer=None, summ_ratio: float = 0.45):
         self.probe, self.tok = probe, tok
         self.budget, self.task = budget, task
         self.min_jump = min_jump                # 跳幅低于此值 = 零信息步, 不值得占预算
+        self.summarizer = summarizer or DEFAULT_SUMMARIZER   # 可插拔(§2): 与本方法正交
+        self.summ_ratio = summ_ratio            # 中间档目标长度 = ratio × 原文长度
         self.steps: list[str] = []
         self.jumps: list[float] = []
         self.values: list[float] = []
@@ -194,9 +259,10 @@ class VTreeCompressor:
 
     # ── 离线一把梭(给实验脚本) ────────────────────────────────────
     @classmethod
-    def compress(cls, steps, probe, tok, budget=512, task="", batch_probe=True):
+    def compress(cls, steps, probe, tok, budget=512, task="", batch_probe=True,
+                 summarizer=None):
         """给完整轨迹, 一次压完. batch_probe=True 时把所有前缀打包问, 快很多."""
-        c = cls(probe, tok, budget, task)
+        c = cls(probe, tok, budget, task, summarizer=summarizer)
         if not batch_probe:
             for s in steps:
                 c.push(s)
@@ -216,6 +282,12 @@ class VTreeCompressor:
         return c.render()
 
     # ── 内部 ──────────────────────────────────────────────────────
+    def _summ(self, i: str | int) -> str:
+        """第 i 步的中间档文本. 目标长度按压缩比给, 保证 S 档确实比 F 档省 ——
+        否则摘要≈原文, 三档会塌成两档."""
+        src = self.steps[i] if isinstance(i, int) else i
+        return self.summarizer(src, max(8, int(len(src) * self.summ_ratio)))
+
     def _ntok(self, t): return len(self.tok(t, add_special_tokens=False).input_ids)
 
     def _ensure_costs(self):
@@ -223,7 +295,7 @@ class VTreeCompressor:
         if self._n_full is not None:
             return
         self._n_full = [self._ntok(s) for s in self.steps]
-        self._n_summ = [self._ntok(summarize_rule(s)) for s in self.steps]
+        self._n_summ = [self._ntok(self._summ(i)) for i in range(len(self.steps))]
 
     def _cost(self, res) -> int:
         """纯算术: 非 MERGE 步的 token 和 + 折叠段数 × 折叠句成本."""
@@ -248,7 +320,7 @@ class VTreeCompressor:
             if run:
                 out.append(FOLD_TMPL.format(n=run))
                 run = 0
-            out.append(self.steps[i] if r == RES_FULL else summarize_rule(self.steps[i]))
+            out.append(self.steps[i] if r == RES_FULL else self._summ(i))
         if run:
             out.append(FOLD_TMPL.format(n=run))
         return "\n".join(out)
@@ -311,5 +383,13 @@ if __name__ == "__main__":
     mem, conf = VTreeCompressor.compress(steps2, ScriptedProbe(vals), _Tok(), budget=110)
     print(mem)
     print("\nconf =", conf)
-    print("\n判读: F=原文(叶子) S=模板摘要(中间层) M=折叠(近根); conf 随档位下降,")
-    print("      供 §3.2② 的保真度加权使用 —— 压得粗的步在信用分配时降权.")
+    print("\n判读: F=原文(叶子) S=摘要(中间层) M=折叠(近根); conf 随档位下降,")
+    print("      供 §3.2② 的保真度加权使用 —— 压得粗的步在信用分配时降权.\n")
+
+    # ── 场景3: 换摘要器, 分辨率分配结果应【不变】 ────────────────────
+    print("=== 场景3 摘要器可插拔: 换实现, 档位分配不该变(摘要器与本方法正交) ===")
+    for name, sm in (("Trunc(通用兜底)", TruncSummarizer()), ("Rule(手写正则,不通用)", RuleSummarizer())):
+        mem, conf = VTreeCompressor.compress(steps2, ScriptedProbe(vals), _Tok(),
+                                             budget=110, summarizer=sm)
+        print(f"  {name:<22} 档位={''.join(D[c] for c in conf)}  实占{len(mem):>4}字")
+    print("  → 档位序列一致 = 本方法只管【哪段压多短】; 摘要器只管【怎么压】, 可换.")
