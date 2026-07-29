@@ -180,12 +180,14 @@ class VTreeCompressor:
     """
 
     def __init__(self, probe, tok, budget: int = 512, task: str = "", v_prior: float = 0.5,
-                 min_jump: float = 0.01, summarizer=None, summ_ratio: float = 0.45):
+                 min_jump: float = 0.01, summarizer=None, summ_ratio: float = 0.45,
+                 tiers: int = 3):
         self.probe, self.tok = probe, tok
         self.budget, self.task = budget, task
         self.min_jump = min_jump                # 跳幅低于此值 = 零信息步, 不值得占预算
         self.summarizer = summarizer or DEFAULT_SUMMARIZER   # 可插拔(§2): 与本方法正交
         self.summ_ratio = summ_ratio            # 中间档目标长度 = ratio × 原文长度
+        self.tiers = tiers                      # 3=原文/摘要/折叠; 2=只有原文/折叠(消融用)
         self.steps: list[str] = []
         self.jumps: list[float] = []
         self.values: list[float] = []
@@ -235,7 +237,7 @@ class VTreeCompressor:
         for i in sorted(range(n - 1), key=lambda k: (-self.jumps[k], -k)):
             if self.jumps[i] < self.min_jump:
                 break        # 已按跳幅降序: 剩下的全是零信息步, 预算宁可剩着也不浪费
-            for target in (RES_FULL, RES_SUMM):
+            for target in ((RES_FULL, RES_SUMM) if self.tiers == 3 else (RES_FULL,)):
                 if target >= res[i]:                        # 只升不降
                     continue
                 trial = res.copy()
@@ -260,9 +262,9 @@ class VTreeCompressor:
     # ── 离线一把梭(给实验脚本) ────────────────────────────────────
     @classmethod
     def compress(cls, steps, probe, tok, budget=512, task="", batch_probe=True,
-                 summarizer=None):
+                 summarizer=None, tiers=3):
         """给完整轨迹, 一次压完. batch_probe=True 时把所有前缀打包问, 快很多."""
-        c = cls(probe, tok, budget, task, summarizer=summarizer)
+        c = cls(probe, tok, budget, task, summarizer=summarizer, tiers=tiers)
         if not batch_probe:
             for s in steps:
                 c.push(s)
@@ -392,4 +394,19 @@ if __name__ == "__main__":
         mem, conf = VTreeCompressor.compress(steps2, ScriptedProbe(vals), _Tok(),
                                              budget=110, summarizer=sm)
         print(f"  {name:<22} 档位={''.join(D[c] for c in conf)}  实占{len(mem):>4}字")
-    print("  → 档位序列一致 = 本方法只管【哪段压多短】; 摘要器只管【怎么压】, 可换.")
+    print("  → 档位序列一致 = 本方法只管【哪段压多短】; 摘要器只管【怎么压】, 可换.\n")
+
+    # ── 场景4: 三档 vs 两档 —— 中间档到底有没有实质好处 ──────────────
+    print("=== 场景4 三档 vs 两档(只留/删): 同预算下保住几条线索 ===")
+    print(f"  {'预算':>4} | {'三档(F/S/M)':^26} | {'两档(F/M)':^26}")
+    print("  " + "-" * 62)
+    for b in (200, 140, 110, 90, 70, 50):
+        row = []
+        for t in (3, 2):
+            mem, conf = VTreeCompressor.compress(steps2, ScriptedProbe(vals), _Tok(),
+                                                 budget=b, tiers=t)
+            k = "".join(x for x, n in zip("ABC", ("线索A", "线索B", "线索C")) if n in mem) or "-"
+            row.append(f"留={k:<3} {len(mem):>3}字 {''.join(D[c] for c in conf)}")
+        star = " ←三档多保住线索" if len(row[0].split()[0]) > len(row[1].split()[0]) else ""
+        print(f"  {b:>4} | {row[0]:^26} | {row[1]:^26}{star}")
+    print("  → 中间档的作用: 预算不够展原文时【降级保主干】, 而不是整条丢掉.")
