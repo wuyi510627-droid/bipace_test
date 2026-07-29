@@ -966,8 +966,9 @@ $L=16$ 时各方案的 (token, 准确率)：
 
 把某一步分别以三种形式接在**同一段原文历史**后面，看它产生的**跳幅排序**还对不对（同一条轨迹内取步对 $i,j$）：
 
-$$\mathrm{acc}=\Pr\Big[\operatorname{sign}\big(\Delta^{c}_i-\Delta^{c}_j\big)=\operatorname{sign}\big(\Delta^{f}_i-\Delta^{f}_j\big)\Big],
-\qquad c_{\text{summ}}=2\big(\mathrm{acc}-0.5\big)$$
+$$\mathrm{acc}=P\Big[\ \mathrm{sign}\big(\Delta^{c}_i-\Delta^{c}_j\big)=\mathrm{sign}\big(\Delta^{f}_i-\Delta^{f}_j\big)\ \Big]$$
+
+$$c_{\text{summ}}=2\big(\mathrm{acc}-0.5\big)$$
 
 上标 $f$ = 原文版，$c$ = 压缩版；$\mathrm{acc}$ 是排序一致率，随机 $=0.5$ 故减半归一到 $[0,1]$。
 
