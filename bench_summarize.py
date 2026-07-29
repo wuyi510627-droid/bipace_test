@@ -100,7 +100,9 @@ print(f"(单条输入 {n_in} tok)")
 @torch.no_grad()
 def _gen(bs, gen):
     enc = tok([p_summ] * bs, return_tensors="pt", padding=True).to(device)
-    model.generate(**enc, max_new_tokens=gen, do_sample=False,
+    # min_new_tokens 强制跑满: 否则 bs=1 会因 early stopping 提前结束,
+    # 而 bs>1 要等所有序列结束 → bs=1 被低估, "相对 bs=1"的加速比失真.
+    model.generate(**enc, max_new_tokens=gen, min_new_tokens=gen, do_sample=False,
                    pad_token_id=tok.pad_token_id)
 
 
