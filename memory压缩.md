@@ -40,6 +40,8 @@ agentic RL，单智能体多轮交互，**稀疏轨迹奖励** → 需要把功�
 
 ## 2. 方法：价值失真记忆树
 
+> 💻 **实现见 [`落地实现方案.md`](落地实现方案.md)**（架构 / 模块接口 / 接进 verl-agent 的挂载点 / 三阶段路线），核心模块已落地为 [`vtree_compressor.py`](vtree_compressor.py)。
+
 ### 2.1 整体流程
 
 ```mermaid
