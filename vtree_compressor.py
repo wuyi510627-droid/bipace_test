@@ -76,13 +76,27 @@ class ConstProbe:
 
 
 class ScriptedProbe:
-    """自测用: 按预设价值序列返回, 精确控制每步跳幅(便于验降档顺序)."""
+    """自测用: 按预设价值序列返回, 精确控制每步跳幅(便于验降档顺序).
+
+    ⚠️ 必须同时支持两种调用方式, 否则在线路径会静默出错:
+       批量(compress): 一次传 T 个前缀  → 一次返回全部
+       在线(push):     每次传 1 个文本  → 按游标依次返回 values[0], values[1], ...
+       早期版本只按"取前 n 个"实现, 在线模式下每次都返回 values[0], 跳幅恒为 0.
+    """
 
     def __init__(self, values):
         self.values = list(values)
+        self.i = 0
 
     def __call__(self, mem_texts, task=""):
-        return np.array(self.values[:len(mem_texts)])
+        n = len(mem_texts)
+        out = np.array([self.values[min(self.i + k, len(self.values) - 1)] for k in range(n)])
+        self.i += n
+        return out
+
+    def reset(self):
+        self.i = 0
+        return self
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -326,6 +340,20 @@ class VTreeCompressor:
         if run:
             out.append(FOLD_TMPL.format(n=run))
         return "\n".join(out)
+
+    def fidelity(self) -> float:
+        """当前 memory 的【整体保真度】∈(0,1] —— 这才是 §3.2② 要用的 conf.
+
+        为什么不是"某一步的档位": 分组用的表示是【整段 memory】(该步当时的历史前缀),
+        所以它的可靠性取决于整段被压得多狠, 而非某一步落在哪档.
+        而且当前步恒为 FULL, 若取单步档位, conf 恒等于 1.0, 完全没有区分度.
+
+        定义: 各步档位 conf 按【原文长度】加权平均 —— 长的步被压掉, 丢的信息更多.
+        """
+        _, conf = self.render()
+        w = np.asarray(self._n_full, dtype=float)
+        c = np.asarray(conf, dtype=float)
+        return float((w * c).sum() / max(w.sum(), 1e-9))
 
     # ── 诊断 ──────────────────────────────────────────────────────
     def stats(self) -> dict:
