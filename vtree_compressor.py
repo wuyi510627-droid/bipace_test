@@ -246,9 +246,13 @@ class VTreeCompressor:
         res[n - 1] = RES_FULL                               # 当前步必须全貌(要拿来决策)
         cur_cost = self._n_full[n - 1]                      # 当前观测的开销, 单独记, 不占历史预算
 
-        # 跳幅大的优先升档: MERGE → SUMM → FULL, 花光历史预算为止.
-        # tie-break: 跳幅相同时【靠后(更近)的优先】—— 否则平局永远是最早的步胜出, 没道理.
-        for i in sorted(range(n - 1), key=lambda k: (-self.jumps[k], -k)):
+        # 按【性价比】排序升档: MERGE → SUMM → FULL, 花光历史预算为止.
+        #   性价比 = 跳幅 / 原文长度 —— 一步跳幅再大, 若要吃掉半个预算, 可能不如
+        #   换两个次要但便宜的步. 纯按跳幅排会让"又长又重要"的步挤掉"又短又还行"的,
+        #   走查里见过: Δ=0.07(19字) 被压, Δ=0.05(13字) 反而保住了原文.
+        # tie-break: 相同性价比时【靠后(更近)的优先】—— 否则平局永远是最早的步胜出.
+        for i in sorted(range(n - 1),
+                        key=lambda k: (-self.jumps[k] / max(self._n_full[k], 1), -k)):
             if self.jumps[i] < self.min_jump:
                 break        # 已按跳幅降序: 剩下的全是零信息步, 预算宁可剩着也不浪费
             for target in ((RES_FULL, RES_SUMM) if self.tiers == 3 else (RES_FULL,)):
