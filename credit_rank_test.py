@@ -120,14 +120,21 @@ def probe(mems, task=""):
 
 @torch.no_grad()
 def embed(texts):
-    """memory → 向量（取晚期层隐状态 mean 池化 + L2 归一, 与 BiPACE 同法）."""
+    """memory → 向量：晚期层隐状态的【last-token】+ L2 归一（与 BiPACE 同法）。
+
+    ⚠️ 必须用 last-token, 不能用 mean 池化 —— 实验③(sep_auc_test.py) 实测:
+         mean : sep-AUC 0.863, 但同处境/不同处境相似度 0.997 vs 0.984, 差距仅 +0.013
+         last : sep-AUC 0.998, 相似度 0.926 vs 0.525,          差距 +0.401  (30 倍)
+       核加权 exp((S-1)/τ) 吃的是【绝对差距】: 差 0.013 时权重几乎均匀 ⇒ 软分组失效,
+       四个臂测出来必然无差异. AUC 高只说明【排序】对, 不代表【拉得开】.
+       (left padding 下, 最后一位就是末 token.)
+    """
     vs = []
     for i in range(0, len(texts), BATCH):
         enc = tok(texts[i:i + BATCH], return_tensors="pt", padding=True,
                   truncation=True, max_length=MAXLEN).to(device)
         h = model(**enc, output_hidden_states=True).hidden_states[LAYER]
-        m = enc.attention_mask.unsqueeze(-1).float()
-        p = (h * m).sum(1) / m.sum(1).clamp(min=1)
+        p = h[:, -1, :]                                  # last-token
         vs.append(torch.nn.functional.normalize(p.float(), dim=-1).cpu().numpy())
     return np.concatenate(vs, 0)
 
