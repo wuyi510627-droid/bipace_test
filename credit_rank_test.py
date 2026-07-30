@@ -46,6 +46,7 @@
 
 import random, numpy as np, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+import vtree_compressor as vc
 from vtree_compressor import VTreeCompressor
 
 MODEL = "/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"
@@ -57,7 +58,9 @@ BUDGET = 80               # vtree 的 token 上限
 TAU = 0.05                # 软分组核宽
 SEEDS = [0, 1, 2]
 device = "cuda" if torch.cuda.is_available() else "cpu"
-ARMS = ["full", "naive", f"trunc{TRUNC_K}", "vtree"]
+ARMS = ["full", "naive", f"trunc{TRUNC_K}", "vtree", "vtree_silent"]
+# vtree_silent: 折叠段【不写标记】(FOLD_TMPL 置空). 用来定位 L 增大时 vtree 落后
+#   的原因是"折叠标记本身成了噪声" 还是"压缩真的丢了信息".
 
 FILLER = ["你走过一段空走廊，两侧什么也没有", "你继续往前，脚步声在走廊里回响",
           "你路过一扇紧闭的侧门", "你看到墙上有几道划痕", "你又往前走了几步",
@@ -164,10 +167,13 @@ def build_mems(tr, prefix_V):
         out["full"].append("\n".join(pre))
         out["naive"].append("你在走廊里走了一段，做了一些事情。")
         out[f"trunc{TRUNC_K}"].append("\n".join(pre[max(0, len(pre) - TRUNC_K):]))
-        c = VTreeCompressor(_CachedProbe(prefix_V[:t + 1]), _Tok(),
-                            budget=BUDGET, task=tr["task"])
-        for o in pre: c.push(o)
-        out["vtree"].append(c.render()[0])
+        for arm, fold in (("vtree", "(此处 {n} 步例行操作已折叠)"), ("vtree_silent", "")):
+            vc.FOLD_TMPL = fold                     # 切换折叠标记
+            c = VTreeCompressor(_CachedProbe(prefix_V[:t + 1]), _Tok(),
+                                budget=BUDGET, task=tr["task"])
+            for o in pre: c.push(o)
+            out[arm].append(c.render()[0])
+    vc.FOLD_TMPL = "(此处 {n} 步例行操作已折叠)"       # 复原
     return out
 
 
@@ -238,7 +244,7 @@ if __name__ == "__main__":
         print("  " + "-" * 50)
         for a in ARMS:
             m = np.array(acc[a]).mean(0); s = np.array(acc[a]).std(0)
-            star = " ★" if a == "vtree" else ""
+            star = " ★" if a.startswith("vtree") else ""
             print(f"  {a:<10} | {m[0]:>6.2f}±{s[0]:<3.1f} | "
                   f"{m[1]:>6.3f}±{s[1]:<4.3f} | {m[2]:>+7.3f}{star}")
 
@@ -250,4 +256,14 @@ if __name__ == "__main__":
   · vtree ≈ full            → 只兑现【动机一】: 压了不亏, token 省下来了;
   · vtree > full (集中度/margin 显著更高) → 兑现【动机二】: 压缩主动提纯了信用信号;
   · vtree ≈ naive           → ⚠️ 压缩没能保住信用信号, 方法的核心主张不成立;
-  · trunc-{TRUNC_K} 应当明显最差 —— 关键步早被截出窗口, 无从分起.""")
+  · trunc-{TRUNC_K} 应当明显最差 —— 关键步早被截出窗口, 无从分起.
+
+  【本轮要定位的问题】L=8 时 vtree 最好, L=14 时反而最差(与"越长越有利"的预期相反).
+  猜测: 本任务的处境识别靠【当前那句观测】(是钥匙还是石头), 历史几乎没用
+        ⇒ 压缩历史的收益≈0, 但折叠标记进了 memory 成了噪声, L 越大标记越多.
+  对照 vtree vs vtree_silent:
+   · silent 明显更好  → 确认折叠标记是噪声源, 改渲染方式(不写标记 / 换更短的写法);
+   · 两者差不多      → 不是标记的问题, 是压缩真丢了信息, 要查丢在哪;
+   · silent 也追不上 full → 本任务测不出压缩的价值(历史不重要), 需换成
+                            【处境识别必须依赖历史】的任务(例如观测只说"面前有扇门",
+                            手里有没有钥匙只能从历史推).""")
