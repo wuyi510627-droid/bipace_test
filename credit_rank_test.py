@@ -6,20 +6,28 @@
 #   中间那一环【信用分配本身】一次都没量过. 而"为信用而压"正是本方法区别于所有
 #   现有压缩方法的地方 —— 不测它, 这个主张就只停留在嘴上.
 #
-# 任务：Key-to-Door + 干扰物（文本版）
-#   走廊里散落【多个可拿的东西】, 每个都是"拿起/路过"二选一,
-#   但【只有钥匙】能开门, 石头和易拉罐都是干扰:
-#     步a  【地上有一块石头】   拿/不拿   ← 干扰
-#     步b  【地上有一把钥匙】   拿/不拿   ← ★关键步
-#     步c  【地上有一个易拉罐】 拿/不拿   ← 干扰
-#     末步 【面前一扇锁着的门】 开门 —— 拿了钥匙才开得了
-#   ⇒ 全部信用【都该】落在钥匙那步.
+# 任务：Key-to-Door + 干扰物 + 【身份藏在历史里】（文本版）
+#   步0   【告示】今天的钥匙是{颜色}的           ← ★★ 关键信息只在这里出现一次
+#   步…   走廊 filler
+#   步a   你看到地上有一个{颜色A}的东西  拿/路过  ← 是钥匙吗? 得回看步0 才知道
+#   步b   你看到地上有一个{颜色B}的东西  拿/路过  ← 干扰
+#   步c   你看到地上有一个{颜色C}的东西  拿/路过  ← 干扰
+#   末步  【面前一扇锁着的门】开门 —— 拿对了颜色才开得了
+#   ⇒ 全部信用【都该】落在"拿起真钥匙"那一步.
 #
-# ⚠️ 为什么非要放干扰物(第一版没有, 自测发现是设计缺陷):
-#   若"拿起钥匙"是整条轨迹里独一无二的动作, 那么光按【动作】一分就能识别它,
-#   根本不需要认出处境 —— 压缩糊不糊都不影响结果, 这个实验就白做了.
-#   放上干扰物后,"拿起"这个动作出现在多个处境, 必须【认得出面对的是钥匙还是石头】
-#   才分得对信用 —— 而"认不认得出处境"正是压缩影响的东西.
+# ⚠️ 三版任务的演进(每版都是被实测推翻后改的, 别再改回去):
+#   v1 无干扰物 → "拿起钥匙"是独一无二的动作, 光按【动作】就能识别, 处境无关紧要,
+#                 压缩糊不糊都不影响 ⇒ 实验白做(本地逻辑自测发现).
+#   v2 加干扰物 → "拿起"出现在多个处境, 必须认出处境. 但物品身份写在【当前那句观测】里
+#                 ("地上有一把钥匙"), 历史仍然没用 ⇒ 压缩历史收益≈0, 且 L 越大越落后.
+#   v3 本版    → 身份只在【步0 的告示】里, 当前观测只说颜色. 于是"这东西是不是钥匙"
+#                 必须结合历史判断 ⇒ 压缩丢了步0 就认错处境、信用分错.
+#                 这才让"压缩质量"真正决定"信用精度".
+#
+# ⚠️ 本版会顺带检验一件方法层面的事:
+#   步0 的告示改变的是【信念】(知道钥匙什么颜色), 不改变【价值】(能不能成还没定).
+#   而方案 §2.2 选的是【价值】跳幅. 若价值信号抓不住步0(vtree 表现差),
+#   说明"必须记住规则/定义"这类任务上价值跳幅有盲区 —— 属真实边界, 要如实记录.
 #
 # 怎么算信用（沿用 GiGPO / BiPACE 那套 critic-free 的组内比较）：
 #   ① 把所有 (轨迹,步) 的 memory 编码成向量
@@ -53,7 +61,7 @@ from vtree_compressor import VTreeCompressor
 MODEL = "/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"
 LAYER, MAXLEN, BATCH = -8, 1024, 8
 G = 16                    # 每组轨迹数（要够大才凑得成组）
-LS = [8, 14]              # 走廊总长（要放得下 3 个可拿物）
+LS = [8, 14]              # 走廊总长（步0 是告示, 之后放 3 个可拿物）
 TRUNC_K = 4               # trunc 臂保留最近几步
 BUDGET = 80               # vtree 的 token 上限
 TAU = 0.05                # 软分组核宽
@@ -68,25 +76,25 @@ FILLER = ["你走过一段空走廊，两侧什么也没有", "你继续往前�
           "头顶的灯管闪了一下", "地上积了些灰尘", "你听见远处有水滴声"]
 
 
-ITEMS = [("【地上躺着一把黄铜钥匙】", True),      # 关键: 拿了才能开门
-         ("【地上有一块灰色的石头】", False),      # 干扰: 动作一样, 但没用
-         ("【地上有一个空易拉罐】", False)]        # 干扰
+COLORS = ["黄铜色", "灰色", "深绿色", "暗红色"]
 
 
 def gen_traj(rng, L):
-    """走廊里散落 3 个可拿物(1 钥匙 + 2 干扰), 每个独立决定拿/不拿.
-    只有拿了钥匙才成功 ⇒ 信用应当全部落在钥匙那步."""
-    slots = sorted(rng.sample(range(1, L - 1), 3))      # 三个物品的位置
-    order = list(range(3)); rng.shuffle(order)           # 谁在前谁在后随机
-    steps, acts, key = [], [], None
-    took_key = False
-    for t in range(L):
+    """身份藏在步0 的告示里: 当前观测只说颜色, 是不是钥匙要回看告示才知道."""
+    cs = rng.sample(COLORS, 3)
+    key_color = cs[0]                                    # 真钥匙的颜色
+    steps = [f"【告示】今天的钥匙是{key_color}的"]         # 步0: 唯一的身份信息
+    acts = ["读告示"]
+    slots = sorted(rng.sample(range(2, L), 3))           # 三个物品的位置(避开步0)
+    order = list(range(3)); rng.shuffle(order)
+    key, took_key = None, False
+    for t in range(1, L + 1):
         if t in slots:
-            txt, is_key = ITEMS[order[slots.index(t)]]
+            c = cs[order[slots.index(t)]]
             take = rng.random() < 0.5
-            steps.append(txt)
-            acts.append("拿起" if take else "路过")       # ← 同一套动作, 靠处境区分
-            if is_key:
+            steps.append(f"你看到地上有一个{c}的东西")     # ← 只说颜色, 不说是什么
+            acts.append("拿起" if take else "路过")
+            if c == key_color:
                 key = t; took_key = take
         else:
             steps.append(rng.choice(FILLER))
@@ -242,9 +250,10 @@ def run(seed, L):
         T = len(tr["steps"])
         rets += [tr["R"]] * T; acts += tr["acts"]
         keyflag += [t == tr["key"] for t in range(T)]; tid += [gi] * T
-        for t, st in enumerate(tr["steps"]):          # 物品类别 = 处境标签
-            kind.append(0 if "钥匙" in st else (1 if "石头" in st else
-                        (2 if "易拉罐" in st else -1)))
+        # 处境标签: 0 = 面对真钥匙, 1 = 面对干扰物, -1 = 非物品步
+        for t, st in enumerate(tr["steps"]):
+            if not st.startswith("你看到地上有一个"): kind.append(-1)
+            else: kind.append(0 if t == tr["key"] else 1)
     rets = np.array(rets); acts = np.array(acts)
     keyflag = np.array(keyflag); tid = np.array(tid); kind = np.array(kind)
 
@@ -253,7 +262,7 @@ def run(seed, L):
         phi = embed(mems[a])
         auc, s_same, s_diff = diag_grouping(phi, kind)
         # 一致性: 取"钥匙"这个处境, 各轨迹在该步的 memory 两两比
-        keymem = [mems[a][i] for i in range(len(kind)) if kind[i] == 0]
+        keymem = [mems[a][i] for i in range(len(kind)) if kind[i] == 0]  # 真钥匙那些步
         cons = diag_consistency(keymem)
         A = advantages(phi, rets, acts)
         rk, cc, mg = [], [], []
@@ -268,7 +277,7 @@ def run(seed, L):
 
 if __name__ == "__main__":
     for L in LS:
-        print(f"\n{'='*74}\n走廊长 L={L}  (1 钥匙 + 2 干扰物; {G} 条轨迹/seed; {len(SEEDS)} seeds)\n{'='*74}")
+        print(f"\n{'='*74}\n走廊长 L={L}  (身份藏在步0告示; 1 真钥匙 + 2 干扰; {G} 条/seed; {len(SEEDS)} seeds)\n{'='*74}")
         acc = {a: [] for a in ARMS}
         for sd in SEEDS:
             r = run(sd, L)
