@@ -44,7 +44,8 @@
 # 运行(有 GPU+模型的机器): python credit_rank_test.py
 # ─────────────────────────────────────────────────────────────────────────
 
-import random, numpy as np, torch
+import random, itertools, numpy as np, torch
+from sklearn.metrics import roc_auc_score
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import vtree_compressor as vc
 from vtree_compressor import VTreeCompressor
@@ -190,6 +191,32 @@ def advantages(phi, rets, acts, tau=TAU):
     return Q - V
 
 
+def diag_grouping(phi, item_kind):
+    """两项诊断, 用来定位"信用精度"的差异是从哪来的:
+       ① sep-AUC     : 同类物品(钥匙/石头/易拉罐)的 memory 是否更相似
+       ② 同处境相似度 : 同类物品之间的平均 cos —— 核加权吃的是这个绝对值
+    """
+    keep = item_kind >= 0
+    p, k = phi[keep], item_kind[keep]
+    S = p @ p.T
+    iu = np.triu_indices(len(p), k=1)
+    same = (k[iu[0]] == k[iu[1]]).astype(int)
+    if same.min() == same.max(): return float("nan"), 0.0, 0.0
+    return (roc_auc_score(same, S[iu]),
+            S[iu][same == 1].mean(), S[iu][same == 0].mean())
+
+
+def diag_consistency(mems_by_traj):
+    """压缩一致性: 同一处境在不同轨迹里, 压出来的 memory 有多像(字符 3-gram Jaccard).
+    full / trunc 是确定性压缩 → 应当很高; vtree 内容自适应 → 可能偏低."""
+    def gram(t): return {t[i:i+3] for i in range(max(0, len(t)-2))}
+    sims = []
+    for a, b in itertools.combinations(mems_by_traj, 2):
+        ga, gb = gram(a), gram(b)
+        if ga or gb: sims.append(len(ga & gb) / max(len(ga | gb), 1))
+    return float(np.mean(sims)) if sims else 0.0
+
+
 def metrics(A, key_idx):
     """A: 一条轨迹各步的优势; key_idx: 关键步下标"""
     a = np.abs(A)
@@ -208,26 +235,34 @@ def run(seed, L):
     for tr in trajs:
         tr["V"] = probe(["\n".join(tr["steps"][:t + 1]) for t in range(len(tr["steps"]))],
                         tr["task"])
-    mems = {a: [] for a in ARMS}; rets, acts, keyflag, tid = [], [], [], []
+    mems = {a: [] for a in ARMS}; rets, acts, keyflag, tid, kind = [], [], [], [], []
     for gi, tr in enumerate(trajs):
         bm = build_mems(tr, tr["V"])
         for a in ARMS: mems[a] += bm[a]
         T = len(tr["steps"])
         rets += [tr["R"]] * T; acts += tr["acts"]
         keyflag += [t == tr["key"] for t in range(T)]; tid += [gi] * T
+        for t, st in enumerate(tr["steps"]):          # 物品类别 = 处境标签
+            kind.append(0 if "钥匙" in st else (1 if "石头" in st else
+                        (2 if "易拉罐" in st else -1)))
     rets = np.array(rets); acts = np.array(acts)
-    keyflag = np.array(keyflag); tid = np.array(tid)
+    keyflag = np.array(keyflag); tid = np.array(tid); kind = np.array(kind)
 
     res = {}
     for a in ARMS:
-        A = advantages(embed(mems[a]), rets, acts)
+        phi = embed(mems[a])
+        auc, s_same, s_diff = diag_grouping(phi, kind)
+        # 一致性: 取"钥匙"这个处境, 各轨迹在该步的 memory 两两比
+        keymem = [mems[a][i] for i in range(len(kind)) if kind[i] == 0]
+        cons = diag_consistency(keymem)
+        A = advantages(phi, rets, acts)
         rk, cc, mg = [], [], []
         for gi in range(G):
             sel = tid == gi
             ki = int(np.where(keyflag[sel])[0][0])
             r, c, m = metrics(A[sel], ki)
             rk.append(r); cc.append(c); mg.append(m)
-        res[a] = (np.mean(rk), np.mean(cc), np.mean(mg))
+        res[a] = (np.mean(rk), np.mean(cc), np.mean(mg), auc, s_same, s_diff, cons)
     return res
 
 
@@ -240,13 +275,21 @@ if __name__ == "__main__":
             for a in ARMS: acc[a].append(r[a])
             print(f"  seed{sd}: " + "  ".join(
                 f"{a}(排名{r[a][0]:.1f}/集中{r[a][1]:.2f})" for a in ARMS))
-        print(f"\n  {'臂':<10} | {'关键步排名':>10} | {'信用集中度':>11} | {'margin':>9}")
-        print("  " + "-" * 50)
+        print(f"\n  {'臂':<13} | {'关键步排名':>9} | {'信用集中度':>11} | {'margin':>8}")
+        print("  " + "-" * 52)
         for a in ARMS:
             m = np.array(acc[a]).mean(0); s = np.array(acc[a]).std(0)
             star = " ★" if a.startswith("vtree") else ""
-            print(f"  {a:<10} | {m[0]:>6.2f}±{s[0]:<3.1f} | "
+            print(f"  {a:<13} | {m[0]:>6.2f}±{s[0]:<3.1f} | "
                   f"{m[1]:>6.3f}±{s[1]:<4.3f} | {m[2]:>+7.3f}{star}")
+        print(f"\n  ── 诊断: 差异从哪来 ──")
+        print(f"  {'臂':<13} | {'sep-AUC':>8} | {'同处境cos':>9} | {'不同处境':>8} | "
+              f"{'差距':>7} | {'压缩一致性':>10}")
+        print("  " + "-" * 68)
+        for a in ARMS:
+            m = np.array(acc[a]).mean(0)
+            print(f"  {a:<13} | {m[3]:>8.3f} | {m[4]:>9.3f} | {m[5]:>8.3f} | "
+                  f"{m[4]-m[5]:>+7.3f} | {m[6]:>10.3f}")
 
     print(f"""
 {'='*74}
@@ -264,6 +307,14 @@ if __name__ == "__main__":
   对照 vtree vs vtree_silent:
    · silent 明显更好  → 确认折叠标记是噪声源, 改渲染方式(不写标记 / 换更短的写法);
    · 两者差不多      → 不是标记的问题, 是压缩真丢了信息, 要查丢在哪;
+   【已测得】silent 比 vtree 更差(L=14: 集中 0.469 vs 0.515) ⇒ 折叠标记【不是噪声】,
+     反而有益 —— 它保留了"此处省了 N 步"的时序信息, 去掉后时序被压扁、对齐更差.
+   【新假设待验】自适应压缩的代价是【表示不一致】: full/trunc 是确定性压缩(结构一致),
+     vtree 按各自跳幅挑步 ⇒ 同处境的两条轨迹可能保留不同的步 ⇒ memory 结构不同
+     ⇒ embedding 距离变大. 看新增的"压缩一致性"列:
+       · vtree 的一致性明显低于 full/trunc, 且信用精度也低 → 假设成立,
+         这是"按价值自适应 ↔ 表示一致性"的内在张力, 属真实 limitation;
+       · 一致性相当但信用精度仍低 → 另找原因(看"同处境cos"那列).
    · silent 也追不上 full → 本任务测不出压缩的价值(历史不重要), 需换成
                             【处境识别必须依赖历史】的任务(例如观测只说"面前有扇门",
                             手里有没有钥匙只能从历史推).""")
