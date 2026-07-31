@@ -55,6 +55,7 @@
 import random, itertools, numpy as np, torch
 from sklearn.metrics import roc_auc_score
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 import vtree_compressor as vc
 from vtree_compressor import VTreeCompressor
 

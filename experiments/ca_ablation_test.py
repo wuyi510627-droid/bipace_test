@@ -32,6 +32,7 @@ import torch
 from scipy.stats import spearmanr
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
+import sys; sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from vtree_compressor import VTreeCompressor
 from credit import (SoftGrouper, CreditAssigner, ARM_SWITCHES, ARM_NAMES,
                     effective_neighbors, grouping_quality)

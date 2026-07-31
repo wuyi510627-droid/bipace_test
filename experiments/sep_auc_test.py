@@ -21,6 +21,7 @@
 import random, numpy as np, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from sklearn.metrics import roc_auc_score
+import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from vtree_compressor import VTreeCompressor
 
 MODEL = "/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"

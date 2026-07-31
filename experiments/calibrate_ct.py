@@ -11,8 +11,9 @@
 # 输出: c_摘要 = 0.xx , c_折叠 = 0.xx  → 直接填回 vtree_compressor.py 的 CONF
 # ─────────────────────────────────────────────────────────────────────────
 
-import random, itertools, numpy as np, torch
+import random, itertools, os, sys, numpy as np, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from vtree_compressor import TruncSummarizer, FOLD_TMPL
 
 MODEL = "/home/wuyi/cuda12-dev/project/models/Qwen2.5-7B-Instruct"

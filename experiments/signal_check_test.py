@@ -22,10 +22,18 @@
 #
 # 【顺带解决一个待办】扫 3 种探针措辞, 选相关性最高的固定下来(详细版 §2.1 坑3).
 #
-# 运行(要 GPU + 模型): python signal_check_test.py
+# 【--belief 模式】用 ∆Belief-RL 的口径替代 ValueProbe:
+#   b_t = P(正确答案 | actor决策prompt + 前t步记忆)
+#   从 actor 决策 forward pass 里直接读 —— 部署时零额外成本.
+#   ∆Belief_t = |log(b_t) − log(b_{t−1})| (或绝对差).
+#   验证"信念跳幅"能不能像"价值跳幅"一样预测真实重要性.
+#
+# 运行(要 GPU + 模型):
+#   python signal_check_test.py            # 标准模式: ValueProbe 三种措辞
+#   python signal_check_test.py --belief   # ∆Belief 模式: P(正确答案|记忆)
 # ═════════════════════════════════════════════════════════════════════════
 
-import random, itertools
+import argparse, random, itertools
 import numpy as np
 import torch
 from scipy.stats import spearmanr
@@ -149,6 +157,37 @@ def jumps_of(tr, prompt_key):
     return np.array(J[:len(steps) - 1]), V      # 与 imp 对齐(去掉终点步)
 
 
+def belief_jumps_of(tr, metric="logratio"):
+    """∆Belief 口径的跳幅: b_t = P(正确答案 | 决策prompt + 前t步记忆).
+
+    不单独问"能成吗"——从 actor 的决策 forward pass 里直接读 P(正确钥匙)。
+    部署时: b_t 和动作决策共享 KV cache ⇒ 零额外成本。
+    这里为测信号质量仍做独立 forward pass（Cost 和 ValueProbe 相当）。
+
+    metric="logratio"  → ∆_t = |log(b_t) − log(b_{t−1})|   (∆Belief-RL 原文)
+    metric="abs"       → ∆_t = |b_t − b_{t−1}|             (与当前 ValueProbe 对齐)
+    """
+    steps = tr["steps"]
+    mems = ["\n".join(steps[:t + 1]) for t in range(len(steps))]
+    b = decide_acc(mems, tr["key"])          # P(正确钥匙 | 前t步记忆)
+    b = np.clip(b, 1e-9, 1.0)               # 防 log(0)
+
+    if metric == "logratio":
+        prev_log = np.log(0.25)              # uniform prior over 4 colors
+        J = []
+        for bt in b:
+            log_bt = np.log(bt)
+            J.append(abs(log_bt - prev_log))
+            prev_log = log_bt
+    else:  # abs
+        prev = 0.25                          # uniform prior
+        J = []
+        for bt in b:
+            J.append(abs(bt - prev))
+            prev = bt
+    return np.array(J[:len(steps) - 1]), b   # 与 imp 对齐(去掉终点步)
+
+
 # ── 三个对照打分 ────────────────────────────────────────────────────────
 def baseline_scores(tr, rng):
     n = len(tr["steps"]) - 1
@@ -171,6 +210,13 @@ def evaluate(score, imp, top_frac=0.25):
 
 # ══════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--belief", action="store_true",
+                    help="∆Belief 模式: P(正确答案|记忆) 替代 ValueProbe 探针")
+    ap.add_argument("--belief-metric", choices=["logratio", "abs"], default="logratio",
+                    help="logratio=∆Belief原文公式 / abs=绝对差(与ValueProbe对齐)")
+    args = ap.parse_args()
+
     all_res = {}          # (prompt_key or baseline) → list of (rho, auc, hit)
     by_kind = {}          # kind → [真实重要性...]
     base_accs = []
@@ -185,10 +231,19 @@ if __name__ == "__main__":
             for k, v in zip(tr["kinds"][:len(imp)], imp):
                 by_kind.setdefault(k, []).append(v)
 
-            for pk in PROMPTS:                                     # 三种措辞
-                J, _ = jumps_of(tr, pk)
-                all_res.setdefault(f"跳幅·{pk}", []).append(evaluate(J, imp))
-            for name, s in baseline_scores(tr, prng).items():      # 三个对照
+            if args.belief:
+                # ── ∆Belief 模式 ──────────────────────────────────────
+                for metric in ["logratio", "abs"]:
+                    J, _ = belief_jumps_of(tr, metric)
+                    tag = f"∆Belief·{metric}"
+                    all_res.setdefault(tag, []).append(evaluate(J, imp))
+            else:
+                # ── 标准 ValueProbe 模式 ──────────────────────────────
+                for pk in PROMPTS:                                   # 三种措辞
+                    J, _ = jumps_of(tr, pk)
+                    all_res.setdefault(f"跳幅·{pk}", []).append(evaluate(J, imp))
+
+            for name, s in baseline_scores(tr, prng).items():        # 三个对照
                 all_res.setdefault(f"对照·{name}", []).append(evaluate(s, imp))
 
     # ── 输出 ────────────────────────────────────────────────────────────
@@ -206,27 +261,82 @@ if __name__ == "__main__":
     print("     说明任务本身没造出重要性差异, 下面的相关性再高也没意义 —— 先改任务.")
 
     print(f"\n{'='*76}")
-    print(f"② 跳幅能否预测真实重要性  (三种措辞 vs 三个对照)")
+    mode_desc = "∆Belief 口径: P(正确答案|记忆)" if args.belief else "跳幅能否预测真实重要性  (三种措辞 vs 三个对照)"
+    print(f"② {mode_desc}")
     print(f"{'='*76}")
-    print(f"  {'打分方式':<16} | {'Spearman':>9} | {'AUC':>7} | {'top-1命中率':>10}")
-    print("  " + "-" * 52)
+    print(f"  {'打分方式':<18} | {'Spearman':>9} | {'AUC':>7} | {'top-1命中率':>10}")
+    print("  " + "-" * 54)
     summary = {}
     for name, rows in all_res.items():
         a = np.array(rows, dtype=float)
         rho, auc, hit = np.nanmean(a, 0)
         summary[name] = (rho, auc, hit)
-        star = " ★" if name.startswith("跳幅") else ""
-        print(f"  {name:<16} | {rho:>+9.3f} | {auc:>7.3f} | {hit:>10.1%}{star}")
+        star = " ★" if (name.startswith("跳幅") or name.startswith("∆Belief")) else ""
+        print(f"  {name:<18} | {rho:>+9.3f} | {auc:>7.3f} | {hit:>10.1%}{star}")
 
-    best = max((n for n in summary if n.startswith("跳幅")),
-               key=lambda n: summary[n][1])
-    worst_base = max((n for n in summary if n.startswith("对照")),
-                     key=lambda n: summary[n][1])
+    if args.belief:
+        # ── ∆Belief 模式判读 ─────────────────────────────────────────
+        believers = [n for n in summary if n.startswith("∆Belief")]
+        base_lines = [n for n in summary if n.startswith("对照")]
 
-    print(f"\n{'='*76}")
-    print("判读")
-    print(f"{'='*76}")
-    print(f"""  【出口条件】最好的跳幅措辞 AUC > 0.8, 且明显高于全部三个对照.
+        print(f"\n{'='*76}")
+        print("判读 · ∆Belief 信号检验")
+        print(f"{'='*76}")
+
+        if len(believers) >= 2:
+            logrho = summary["∆Belief·logratio"][1]
+            absrho = summary["∆Belief·abs"][1]
+            best_belief = "∆Belief·logratio" if logrho > absrho else "∆Belief·abs"
+            print(f"  logratio AUC = {logrho:.3f}  |  abs AUC = {absrho:.3f}")
+            print(f"  更好的口径: {best_belief}  (AUC {summary[best_belief][1]:.3f})")
+
+        # 对比 ValueProbe 的口径（如果上次跑过，从已有结果里比对）
+        if "跳幅·success" in summary:
+            probe_auc = summary["跳幅·success"][1]
+            belief_auc = summary.get("∆Belief·logratio", (0,0,0))[1]
+            gap = probe_auc - belief_auc
+            ratio = belief_auc / max(probe_auc, 1e-9)
+            print(f"\n  对比 ValueProbe·success AUC={probe_auc:.3f}")
+            print(f"        ∆Belief·logratio  AUC={belief_auc:.3f}")
+            print(f"        差距 = {gap:+.3f}  (belief/probe = {ratio:.1%})")
+
+        best_base = max(base_lines, key=lambda n: summary[n][1])
+        print(f"""
+  【出口条件】∆Belief 的 AUC > 0.7, 且 ≥ 最强对照的 90%.
+
+  本轮: 最强对照 = {best_base}  (AUC {summary[best_base][1]:.3f})
+
+  · ∆Belief AUC > 0.7 且 ≥ 对照的 90%
+        → ✅ ∆Belief 信号站得住! 可以省掉 ValueProbe 那 13.9% 的额外成本.
+          论文里这样写:
+          "We adopt the ∆Belief-RL (Auzina et al., ICML 2026) framework:
+           instead of a separate value probe, we read the agent's own belief
+           b_t = P(correct|h_t) from the decision forward pass — zero extra cost.
+           The belief shift |log(b_t/b_{t-1})| provides a reliable compression
+           signal, matching or exceeding the separate-probe baseline."
+
+  · ∆Belief ≈ 随机 (<0.3)
+        → ❌ P(正确答案) 在早期步没有区分度 —— agent 一开始完全蒙, 概率
+          稳定在 ~0.25, 到终点附近才蹦起来. 这意味着 trail-end bias:
+          跳幅大部分集中在最后几步, 前期该保留的观测可能被错压.
+          解决方案: 不用 ∆Belief 做压缩信号, 退回到小模型探针(路线二).
+
+  · ∆Belief < Probe 但 > 0.7
+        → ⚠️ 信号仍在, 但不如专问"能成吗". 论文里如实报告:
+          "∆Belief provides a free compression signal at > $sp metric; the
+           probe-based signal adds $diff at $cost extra computation."
+          让读者自己选 —— 这是最诚实的写法.""")
+    else:
+        # ── 标准模式判读（不变）───────────────────────────────────────
+        best = max((n for n in summary if n.startswith("跳幅")),
+                   key=lambda n: summary[n][1])
+        worst_base = max((n for n in summary if n.startswith("对照")),
+                         key=lambda n: summary[n][1])
+
+        print(f"\n{'='*76}")
+        print("判读")
+        print(f"{'='*76}")
+        print(f"""  【出口条件】最好的跳幅措辞 AUC > 0.8, 且明显高于全部三个对照.
 
   本轮: 最好的措辞 = {best}  (AUC {summary[best][1]:.3f})
         最强的对照 = {worst_base}  (AUC {summary[worst_base][1]:.3f})
