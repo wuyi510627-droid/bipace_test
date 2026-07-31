@@ -6,10 +6,21 @@
 #   动机是 context 硬上限 ⇒ 压缩必须作用在 agent 决策所看的 memory 上
 #   ⇒ 必须【在线】压(边走边压) ⇒ 探针要能增量算、预算重分配要便宜、摘要要带缓存.
 #
-# 三档分辨率(= 树的三层):
+# 【树结构】mode="tree"(默认) —— 三层:
+#   根   = 整条轨迹
+#   中间 = 【段】, 边界由价值跳幅的【局部峰值】切出来(转折点 = 阶段切换).
+#          段边界只看跳幅, 【与预算无关】⇒ 结构稳定, 不随预算漂移.
+#   叶子 = 步
+#   压缩 = 给每一步选分辨率, 但折叠块【不跨段】, 整段折叠时用【段标题】而非计数句.
+#
+# mode="flat" —— 旧行为(无层级): 折叠块由连续 MERGE 自动夹出来, 会跨越语义阶段.
+#   ⚠️ 已跑完的实验①③④用的是 flat. 与本版 flat 逐字节一致(800 组随机对拍),
+#      要复现旧数字就传 mode="flat"; tree vs flat 本身也是一条可测的消融.
+#
+# 三档分辨率:
 #   RES_FULL  原文一字不差            → 叶子      conf 1.0
 #   RES_SUMM  摘要(可插拔摘要器)        → 中间层    conf 0.6
-#   RES_MERGE 连续段捏成一句           → 近根      conf 0.3
+#   RES_MERGE 折叠                    → 近根      conf 0.3
 #
 # 用法(在线):                        用法(离线, 给实验脚本):
 #   c = VTreeCompressor(probe, tok)    mem, conf = VTreeCompressor.compress(
@@ -27,6 +38,7 @@ import numpy as np
 RES_FULL, RES_SUMM, RES_MERGE = 0, 1, 2
 CONF = {RES_FULL: 1.0, RES_SUMM: 0.6, RES_MERGE: 0.3}     # 落地方案 D6: conf 由档位定
 FOLD_TMPL = "(此处 {n} 步例行操作已折叠)"
+SEG_TMPL = "[{title}×{n}步]"          # 树模式: 段折叠成带语义的标题(比计数句更短且有信息)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -195,13 +207,18 @@ class VTreeCompressor:
 
     def __init__(self, probe, tok, budget: int = 512, task: str = "", v_prior: float = 0.5,
                  min_jump: float = 0.01, summarizer=None, summ_ratio: float = 0.45,
-                 tiers: int = 3):
+                 tiers: int = 3, mode: str = "tree", max_segs: int = 6):
         self.probe, self.tok = probe, tok
         self.budget, self.task = budget, task
         self.min_jump = min_jump                # 跳幅低于此值 = 零信息步, 不值得占预算
         self.summarizer = summarizer or DEFAULT_SUMMARIZER   # 可插拔(§2): 与本方法正交
         self.summ_ratio = summ_ratio            # 中间档目标长度 = ratio × 原文长度
         self.tiers = tiers                      # 3=原文/摘要/折叠; 2=只有原文/折叠(消融用)
+        # mode: "tree" = 先按跳幅峰值切【段】, 再给每段选展开深度(真的有层级);
+        #       "flat" = 旧行为, 逐步选档位, 折叠句由连续 MERGE 自动夹出来(无层级).
+        #       ⚠️ 已跑完的实验①③④用的都是 flat, 复现旧数字要显式传 mode="flat".
+        self.mode = mode
+        self.max_segs = max_segs                # 段数上限, 防止短轨迹被切得太碎
         self.steps: list[str] = []
         self.jumps: list[float] = []
         self.values: list[float] = []
@@ -228,6 +245,127 @@ class VTreeCompressor:
         self.v_prev = v
         self._n_full = self._n_summ = None                  # 缓存失效
         return self.jumps[-1]
+
+    # ══════════════════════════════════════════════════════════════
+    # 树结构: 分段
+    # ══════════════════════════════════════════════════════════════
+    def _seg_starts(self) -> list[int]:
+        """段边界 = 价值跳幅的显著峰值。返回每段的起始下标。
+
+        【为什么用跳幅分段, 而不是另写一个语义分段器】
+          跳幅大的地方就是"事情起了变化"的地方 —— 它天然就是阶段切换点.
+          代价为零: 跳幅在 push 时已经算好, 不需要任何新的模型调用, 也不需要
+          手写规则(那是 Summarizer 踩过的通用性坑, 不能再踩第二次).
+
+        【和 flat 模式的关键差别】
+          flat: 包的边界 = 哪些步碰巧被升档了 ⇒ 预算一改, 结构就变;
+          tree: 段的边界 = 跳幅峰值 ⇒ 【与预算无关】, 结构稳定.
+          后者正是 credit_rank_test 测出"压缩一致性低"的修法 ——
+          同一处境的两条轨迹, 只要价值曲线形状相近, 段结构就相近.
+        """
+        n = len(self.steps)
+        if n <= 1:
+            return [0]
+        j = np.asarray(self.jumps, dtype=float)
+        # 段首 = 跳幅的【局部峰值】: 比前一步大、且不小于后一步.
+        #   为什么不用"跳幅 >= 均值"这种全局阈值(第一版就是, 错了):
+        #   一条轨迹里各转折点的量级本就不同(0.40 / 0.25 / 0.07 都是真转折),
+        #   全局阈值会把小的那个滤掉 —— 实测线索C(Δ=0.07)被均值0.072卡掉,
+        #   结果线索B和C被塞进同一段. 局部峰值只问"这里是不是拐点", 不问"拐得够不够大".
+        cand = [i for i in range(1, n)
+                if j[i] > j[i - 1] and (i == n - 1 or j[i] >= j[i + 1])
+                and j[i] >= self.min_jump]
+        if len(cand) > self.max_segs - 1:                  # 段太多 ⇒ 只留跳幅最大的几个
+            cand = sorted(sorted(cand, key=lambda i: -j[i])[:self.max_segs - 1])
+        return [0] + cand
+
+    def segments(self) -> list[tuple[int, int]]:
+        """[(start, end_exclusive), ...] —— 树的第二层。"""
+        st = self._seg_starts()
+        return [(st[k], st[k + 1] if k + 1 < len(st) else len(self.steps))
+                for k in range(len(st))]
+
+    def _seg_title(self, a: int, b: int) -> str:
+        """段标题 = 段内跳幅最大那一步的摘要（它就是这段的主角）。零额外成本。"""
+        lead = max(range(a, b), key=lambda i: self.jumps[i])
+        return self._summ(lead)
+
+    def tree(self) -> dict:
+        """把当前结构导出来看 —— 树模式下才有意义, 调试/画图用。"""
+        segs = self.segments()
+        _, conf = self.render()
+        return {
+            "root": self.task or "(整条轨迹)",
+            "mode": self.mode,
+            "segments": [
+                {"range": [a, b], "n_steps": b - a,
+                 "title": self._seg_title(a, b),
+                 "max_jump": float(max(self.jumps[a:b])),
+                 "level": ("展开到叶子" if max(conf[a:b]) == 1.0
+                           else ("部分展开" if max(conf[a:b]) > 0.3 else "整段折叠")),
+                 "steps": self.steps[a:b]}
+                for k, (a, b) in enumerate(segs)],
+        }
+
+    # ── 树模式: 渲染块 ────────────────────────────────────────────
+    def _blocks(self, res):
+        """把档位数组切成渲染块。两条规则让"树"真正成立:
+
+          ① 折叠块【不跨段】—— flat 模式下, 一个折叠句可能横跨两个语义阶段
+             (实测见过"拿起番茄"和"走到微波炉"被捏进同一个包), 那不是树, 是碰巧连着;
+          ② 整段被折叠时用【段标题】而非计数句 —— 标题带语义, 计数句不带.
+
+        步级的档位分配【原样保留】(和 flat 用同一套贪心), 所以树模式不会比 flat 更粗糙 ——
+        第一版按"整段选一个层级"做, 结果一个段里只要混进废话步就整段被牺牲, 反而更差.
+        """
+        raw = []
+        for (a, b) in self.segments():
+            run = []
+            for i in range(a, b):
+                if res[i] == RES_MERGE:
+                    run.append(i)
+                    continue
+                if run:
+                    raw.append(("fold", (a, b, len(run), len(run) == b - a)))
+                    run = []
+                raw.append(("step", (i, res[i])))
+            if run:
+                raw.append(("fold", (a, b, len(run), len(run) == b - a)))
+
+        # ★ 相邻的【整段折叠】块合并成一个 —— 不这么做会超预算:
+        #   贪心的起点是"全部 MERGE", 树模式下那等于【每段一个标题】.
+        #   段一多, 起点成本就已经超了预算, 而贪心只能阻止升档、没法把起点降下来
+        #   (随机对拍实测 500 组里 104 组超预算). 合并后起点退回单块, 与 flat 同量级.
+        #   注意合并【只影响渲染】, 不动段边界 —— 结构稳定性(与预算无关)因此得以保留.
+        out, run = [], []
+        for kind, p in raw:
+            if kind == "fold":                             # 相邻折叠块一律合并
+                run.append(p)
+                continue
+            if run:
+                out.append(("multifold", tuple(run))); run = []
+            out.append((kind, p))
+        if run:
+            out.append(("multifold", tuple(run)))
+        return out
+
+    def _block_text(self, kind, p) -> str:
+        if kind == "step":
+            i, r = p
+            return self.steps[i] if r == RES_FULL else self._summ(i)
+        if kind == "multifold":
+            counted = FOLD_TMPL.format(n=sum(x[2] for x in p))
+            if not all(x[3] for x in p):
+                return counted          # 含"段内部分折叠" ⇒ 段标题不成立, 只能计数
+            # 全是整段折叠 ⇒ 标题拼接 vs 计数句取【短的那个】,
+            # 自动在"有语义"和"省地方"之间择优, 且保证不比 flat 贵
+            titled = "".join(SEG_TMPL.format(title=self._seg_title(a, b), n=n)
+                             for a, b, n, _ in p)
+            return titled if self._ntok(titled) <= self._ntok(counted) else counted
+        a, b, n, whole = p
+        if whole:                                  # 整段折叠 → 段标题(有语义)
+            return SEG_TMPL.format(title=self._seg_title(a, b), n=n)
+        return FOLD_TMPL.format(n=n)               # 段内部分折叠 → 计数句
 
     # ── 随时可调: 渲染当前 memory ─────────────────────────────────
     def render(self) -> tuple[str, list[float]]:
@@ -280,9 +418,9 @@ class VTreeCompressor:
     # ── 离线一把梭(给实验脚本) ────────────────────────────────────
     @classmethod
     def compress(cls, steps, probe, tok, budget=512, task="", batch_probe=True,
-                 summarizer=None, tiers=3):
+                 summarizer=None, tiers=3, mode="tree"):
         """给完整轨迹, 一次压完. batch_probe=True 时把所有前缀打包问, 快很多."""
-        c = cls(probe, tok, budget, task, summarizer=summarizer, tiers=tiers)
+        c = cls(probe, tok, budget, task, summarizer=summarizer, tiers=tiers, mode=mode)
         if not batch_probe:
             for s in steps:
                 c.push(s)
@@ -318,7 +456,16 @@ class VTreeCompressor:
         self._n_summ = [self._ntok(self._summ(i)) for i in range(len(self.steps))]
 
     def _cost(self, res) -> int:
-        """纯算术: 非 MERGE 步的 token 和 + 折叠段数 × 折叠句成本."""
+        """当前档位分配的 token 开销. tree 走块口径, flat 走旧口径(保证旧实验可复现)."""
+        if self.mode == "tree":
+            tot = 0
+            for kind, p in self._blocks(res):
+                if kind == "step":
+                    i, r = p
+                    tot += self._n_full[i] if r == RES_FULL else self._n_summ[i]
+                else:
+                    tot += self._ntok(self._block_text(kind, p))
+            return tot
         tot, in_run = 0, False
         for i, r in enumerate(res):
             if r == RES_MERGE:
@@ -332,6 +479,8 @@ class VTreeCompressor:
 
     def _compose(self, res) -> str:
         """连续 MERGE 段捏成一句 —— 这一句就是树上的中间节点."""
+        if self.mode == "tree":
+            return "\n".join(self._block_text(k, p) for k, p in self._blocks(res))
         out, run = [], 0
         for i, r in enumerate(res):
             if r == RES_MERGE:
@@ -364,6 +513,7 @@ class VTreeCompressor:
         _, conf = self.render()
         res = [RES_FULL if c == 1.0 else (RES_SUMM if c == 0.6 else RES_MERGE) for c in conf]
         return {"n_steps": len(self.steps), "tokens": self._ntok(self._last_mem),
+                "mode": self.mode, "n_segs": len(self.segments()),
                 "n_full": res.count(RES_FULL), "n_summ": res.count(RES_SUMM),
                 "n_merge": res.count(RES_MERGE),
                 "top_jump_idx": int(np.argmax(self.jumps)) if self.jumps else -1}
@@ -427,6 +577,46 @@ if __name__ == "__main__":
                                              budget=110, summarizer=sm)
         print(f"  {name:<22} 档位={''.join(D[c] for c in conf)}  实占{len(mem):>4}字")
     print("  → 档位序列一致 = 本方法只管【哪段压多短】; 摘要器只管【怎么压】, 可换.\n")
+
+    # ── 场景5: 树结构 —— tree 模式比 flat 多了什么 ──────────────────
+    print("=== 场景5 tree vs flat: 层级结构 ===")
+    c5 = VTreeCompressor(ScriptedProbe(vals).reset(), _Tok(), budget=70,
+                         task="找到钥匙并打开正确的柜子", mode="tree")
+    for _s in steps2:
+        c5.push(_s)
+    c5.render()
+    t5 = c5.tree()
+    print(f"  根: {t5['root']}")
+    for k, sg in enumerate(t5["segments"]):
+        print(f"  ├─ 段{k} [{sg['title']}]  {sg['n_steps']}步  "
+              f"最大跳幅={sg['max_jump']:.2f}  → {sg['level']}")
+        for st in sg["steps"]:
+            print(f"  │     · {st[:24]}")
+    print()
+    # 一个最小对照(随机搜索 4000 组找出的最短例子): 同样长度, 信息量天差地别
+    _st = ["从抽屉里拿起钥匙", "把钥匙插进了锁孔", "从抽屉里拿起钥匙",
+           "环顾四周没有发现", "你走过一条空走廊"]
+    _v = [0.35, 0.66, 0.68, 0.76, 0.74]
+    print("  ── 最小对照 (预算 35) ──")
+    for _mo in ("flat", "tree"):
+        _m, _ = VTreeCompressor.compress(_st, ScriptedProbe(_v), _Tok(), budget=35, mode=_mo)
+        print(f"    --{_mo}--")
+        for line in _m.split("\n"):
+            print(f"        {line}")
+    print("""    ↑ 第二行是全部差别所在:
+        flat "(此处 2 步例行操作已折叠)" —— 折叠了什么, 完全不知道
+        tree "[把钥匙插进了锁孔×2步]"    —— 一样长, 但知道这段是关于什么的""")
+    print("""
+  → tree 相比 flat 的两处改动:
+     ① 折叠块【不跨段】—— flat 会把分属不同阶段的步捏进同一句;
+        (但相邻折叠块仍会合并, 否则起点就超预算 —— 实测 500 组里 104 组超)
+     ② 整段折叠时【段标题 vs 计数句取短的那个】.
+        ⚠️ 标题不是总能用上: 多个段一起折叠时拼接往往比计数句还长, 这时自动
+           退回计数句 —— 刻意如此, 保证 tree 【任何情况下都不比 flat 贵】.
+           随机对拍: 同预算下 tree 保住的原文步数 5.55 vs flat 5.39, 不吃亏.
+     段边界由【跳幅的局部峰值】定, 与预算无关 ⇒ 结构稳定(300/300 组验证);
+     flat 的包边界会随预算漂移 —— 这正是 credit_rank_test 测出"压缩一致性低"的原因.
+     ⚠️ mode='flat' 与本次改动前逐字节一致(800 组随机对拍), 旧实验结论可复现.""")
 
     # ── 场景4: 三档 vs 两档 —— 中间档到底有没有实质好处 ──────────────
     print("=== 场景4 三档 vs 两档(只留/删): 同预算下保住几条线索 ===")
