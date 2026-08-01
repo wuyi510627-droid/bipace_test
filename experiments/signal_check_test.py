@@ -311,8 +311,8 @@ if __name__ == "__main__":
           论文里这样写:
           "We adopt the ∆Belief-RL (Auzina et al., ICML 2026) framework:
            instead of a separate value probe, we read the agent's own belief
-           b_t = P(correct|h_t) from the decision forward pass — zero extra cost.
-           The belief shift |log(b_t/b_{t-1})| provides a reliable compression
+           b_t = P(correct|h_t) from the decision forward pass - zero extra cost.
+           The belief shift |log(b_t/b_{{t-1}})| provides a reliable compression
            signal, matching or exceeding the separate-probe baseline."
 
   · ∆Belief ≈ 随机 (<0.3)
