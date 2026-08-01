@@ -101,6 +101,57 @@ Your task is to: heat some tomato and put it on the table.
 | 历史累积 | 完整轨迹 50 步可达 20k+ token——**必须压缩** |
 | 可验证性 | 任务有明确成功/失败判据，可写程序自动判分 |
 
+### 示例 4（最长轨迹）：复合任务——两个物品清洁后放不同位置
+
+```
+Your task is to: put a clean sponge in the cabinet and put a clean cloth on the diningtable.
+
+────────────────────────────────────
+
+步0  obs: You are in the middle of a room. Looking around, you see a cabinet 1,
+          a countertop 1, a diningtable 1, a sinkbasin 1, a shelf 1, and a sidetable 1.
+     act: go to countertop 1
+步1  obs: You arrive at countertop 1. On the countertop 1, you see a saltshaker 1,
+          a sponge 1, a bowl 2, and a cloth 1.                          (~24 token)
+     act: take sponge 1 from countertop 1                               ← 拿第一个物品
+步2  obs: You pick up the sponge 1 from the countertop 1.               (~10 token)
+     act: go to sinkbasin 1
+步3  obs: You arrive at sinkbasin 1. The sinkbasin 1 is empty.          (~8 token)
+     act: clean sponge 1 with sinkbasin 1
+步4  obs: You clean the sponge 1 using the sinkbasin 1.                 (~10 token)
+     act: go to cabinet 1
+步5  obs: You arrive at cabinet 1. The cabinet 1 is closed.             (~8 token)
+     act: open cabinet 1
+步6  obs: You open the cabinet 1. On the cabinet 1, you see a mug 2
+          and a book 3.                                                  (~18 token)
+     act: put sponge 1 in cabinet 1
+步7  obs: You put the sponge 1 in the cabinet 1.                        (~10 token)
+     act: close cabinet 1
+步8  obs: You close the cabinet 1.                                      (~6 token)
+     act: go to countertop 1                                           ← 回去拿第二个物品
+步9  obs: You arrive at countertop 1. On the countertop 1, you see a saltshaker 1,
+          a bowl 2, and a cloth 1.                                      (~20 token)
+     act: take cloth 1 from countertop 1
+步10 obs: You pick up the cloth 1 from the countertop 1.                (~10 token)
+     act: go to sinkbasin 1
+步11 obs: You arrive at sinkbasin 1. The sinkbasin 1 is empty.          (~8 token)
+     act: clean cloth 1 with sinkbasin 1
+步12 obs: You clean the cloth 1 using the sinkbasin 1.                  (~10 token)
+     act: go to diningtable 1
+步13 obs: You arrive at diningtable 1. On the diningtable 1, you see a
+          vase 1, a candle 1, and a plate 2.                            (~20 token)
+     act: put cloth 1 on diningtable 1
+步14 obs: You put the cloth 1 on the diningtable 1.                     (~10 token)
+     结果：成功 ✅  R = 1.0
+
+整条轨迹 15 步，共约 190 token（纯观测）。加上历史累积后，prompt 里的 memory 远超此数。
+
+...（实际 ALFWorld 最长复合任务可达 50 步——如"find two pencils and put one on the desk
+     and one on the shelf, then put a book in the drawer"，需要穿梭于 8~10 个房间、
+     在不同家具间反复移动、操作多种物品。50 步轨迹的观测本身约 500~700 token，
+     但 memory 累积可达 20000+ token，这就是动机一"物理上非压不可"的直接原因。）
+```
+
 ---
 
 ## WebShop
@@ -224,51 +275,204 @@ act: click[Buy Now]
 结果：失败 ❌  R = 0.0  (指令要求红色，选了黑色)
 ```
 
-### 示例 3：买一个笔记本电脑支架
+### 示例 4（最长轨迹）：反复搜索翻页选商品
 
 ```
-指令: Find me a laptop stand that is adjustable and under $50.
+指令: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+      Preferably a science or building kit.
 
-步0:
-obs: Find me a laptop stand that is adjustable and under $50.
+────────────────────────────────────
+
+步0 [搜索页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
      [SEP] Search
-act: search[laptop stand adjustable]
+act: search[science kit kids age 6-8]
 
-步1:
-obs: Find me a laptop stand that is adjustable and under $50.
-     [SEP] HUANUO Adjustable Laptop Stand, Aluminum $39.99
-     [SEP] Besign LS03 Aluminum Laptop Stand $29.99
-     [SEP] VIVO Adjustable Laptop Stand $44.99
-     [SEP] Rain Design mStand Laptop Stand $49.90
+────────────────────────────────────
+
+步1 [搜索结果页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] NATIONAL GEOGRAPHIC Science Kit for Kids - 45 Experiments $29.99
+     [SEP] KiwiCo Crystal Growing Kit for Kids $24.95
+     [SEP] Learning Resources Gears Building Set $34.99
+     [SEP] 4M Solar System Planetarium Model Kit $14.99
      [SEP] Next >
      [SEP] < Prev
      [SEP] Back to Search
-act: click[HUANUO Adjustable Laptop Stand, Aluminum]
+act: click[Next >]
 
-步2:
-obs: Find me a laptop stand that is adjustable and under $50.
-     [SEP] HUANUO Adjustable Laptop Stand, Aluminum
-     [SEP] $39.99
-     [SEP] Color: Silver
-     [SEP] Color: Black
+────────────────────────────────────
+
+步2 [搜索结果第2页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Klutz LEGO Chain Reactions Craft Kit $21.99
+     [SEP] Thames and Kosmos Kids First Chemistry Set $34.95
+     [SEP] Snap Circuits Jr. Electronics Kit $29.95
+     [SEP] Creativity for Kids Grow 'n Glow Terrarium $19.99
+     [SEP] Next >
+     [SEP] < Prev
+     [SEP] Back to Search
+act: click[Snap Circuits Jr. Electronics Kit]
+
+────────────────────────────────────
+
+步3 [商品详情页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Snap Circuits Jr. Electronics Kit
+     [SEP] $29.95
+     [SEP] Size: Standard
+     [SEP] Size: Deluxe
      [SEP] Description
      [SEP] Features
      [SEP] Reviews
      [SEP] Buy Now
+act: click[Reviews]
+
+────────────────────────────────────
+
+步4 [查看评价]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Snap Circuits Jr. Electronics Kit
+     [SEP] ★★★★☆ 4.2/5 (1,247 reviews)
+     [SEP] "Kids love it, but instructions are a bit confusing for younger ones" - Jane
+     [SEP] "Perfect for my 7 year old grandson!" - Michael
+     [SEP] "Some parts broke after a few uses" - Sarah
+     [SEP] Back to Product
+act: click[Back to Product]
+
+────────────────────────────────────
+
+步5 [回到商品页]:
+act: click[Back to Search]          ← 评价一般，放弃这个
+
+────────────────────────────────────
+
+步6 [搜索结果第2页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Klutz LEGO Chain Reactions Craft Kit $21.99
+     [SEP] Thames and Kosmos Kids First Chemistry Set $34.95
+     [SEP] Snap Circuits Jr. Electronics Kit $29.95
+     [SEP] Creativity for Kids Grow 'n Glow Terrarium $19.99
+     [SEP] Next >
+     [SEP] < Prev
+     [SEP] Back to Search
+act: click[Thames and Kosmos Kids First Chemistry Set]
+
+────────────────────────────────────
+
+步7 [商品详情页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Thames and Kosmos Kids First Chemistry Set
+     [SEP] $34.95
+     [SEP] Color: Blue Box
+     [SEP] Color: Red Box
+     [SEP] Size: Starter Set
+     [SEP] Size: Deluxe Set
+     [SEP] Description
+     [SEP] Features
+     [SEP] Reviews
+     [SEP] Buy Now
+act: click[Color: Blue Box]
+
+────────────────────────────────────
+
+步8 [选了颜色]:
+obs: You have clicked Color: Blue Box.
+     I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Thames and Kosmos Kids First Chemistry Set
+     [SEP] $34.95
+     [SEP] [clicked button] Color: Blue Box [clicked button_]
+     [SEP] [button] Color: Red Box [button_]
+     [SEP] [button] Size: Starter Set [button_]
+     [SEP] [button] Size: Deluxe Set [button_]
+     [SEP] [button] Description [button_]
+     [SEP] [button] Features [button_]
+     [SEP] [button] Reviews [button_]
+     [SEP] [button] Buy Now [button_]
+act: click[Features]
+
+────────────────────────────────────
+
+步9 [查看规格]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Thames and Kosmos Kids First Chemistry Set
+     [SEP] $34.95
+     [SEP] Ages 8+ (not suitable under 8 without adult supervision)
+     [SEP] 25+ experiments included
+     [SEP] All materials and instruction book included
+     [SEP] Back to Product
+act: click[Back to Product]         ← 年龄要求不匹配，再放弃
+
+────────────────────────────────────
+
+步10 [回到商品页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Thames and Kosmos Kids First Chemistry Set
+     [SEP] $34.95
+     [SEP] [clicked button] Color: Blue Box [clicked button_]
+     [SEP] [button] Color: Red Box [button_]
+     [SEP] [button] Size: Starter Set [button_]
+     [SEP] [button] Size: Deluxe Set [button_]
+     [SEP] [button] Description [button_]
+     [SEP] [button] Features [button_]
+     [SEP] [button] Reviews [button_]
+     [SEP] [button] Buy Now [button_]
+     [SEP] Back to Search
+act: click[Back to Search]
+
+────────────────────────────────────
+
+步11 [搜索结果第2页]:
+act: click[< Prev]
+
+────────────────────────────────────
+
+步12 [回到第1页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] NATIONAL GEOGRAPHIC Science Kit for Kids - 45 Experiments $29.99
+     [SEP] KiwiCo Crystal Growing Kit for Kids $24.95
+     [SEP] Learning Resources Gears Building Set $34.99
+     [SEP] 4M Solar System Planetarium Model Kit $14.99
+     [SEP] Next >
+     [SEP] < Prev
+     [SEP] Back to Search
+act: click[Learning Resources Gears Building Set]
+
+────────────────────────────────────
+
+步13 [商品详情页]:
+obs: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
+     Preferably a science or building kit.
+     [SEP] Learning Resources Gears Building Set
+     [SEP] $34.99
+     [SEP] Size: 100 Pieces
+     [SEP] Size: 150 Pieces
+     [SEP] Description
+     [SEP] Features
+     [SEP] Reviews
+     [SEP] Buy Now
+act: click[Size: 100 Pieces]
+
+────────────────────────────────────
+
+步14 [选完规格]:
 act: click[Buy Now]
 
-结果：成功 ✅  R = 1.0
+结果：成功 ✅  R = 1.0  (商品匹配：教育类 + 建筑套件 + 6-8岁 + <$35)
 ```
 
-### WebShop 观测特点
-
-| 特征 | 说明 |
-|---|---|
-| 单步 token | 200~800 token，取决于结果页商品数（3~10 个商品展示） |
-| 完整轨迹 | 平均 5~10 步，~2000~6000 token |
-| 长度波动 | 不同查询结果数不同，观测 token 数波动较大 |
-| GiGPO/BiPACE 设置 | 最大 15 步/集，历史窗口 = 2，max prompt = 4096 token |
-| 自动评分 | 程序匹配——比对商品属性/类型/价格是否满足指令要求 |
+这条最长轨迹 15 步：两次搜索翻页、两次查看后退回、三次选规格。中途放弃两个商品后才找到对的。每步观测 200~800 token → 整条轨迹 ~8000~12000 token。
 
 ---
 
