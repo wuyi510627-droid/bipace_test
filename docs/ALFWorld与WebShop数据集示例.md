@@ -4,9 +4,9 @@
 
 ## ALFWorld
 
-> 家居文本交互环境。agent 在房间里移动、拿放物品、操作家电。每条观测 4~6 个模板句，约 30~80 token。GiGPO 论文记录一条轨迹可达 50 步、超过 20k token（含历史累积）。
+> 家居文本交互环境。agent 在房间里移动、拿放物品、操作家电。每条观测 4~6 个模板句，约 30~80 token。
 
-### 示例 1：番茄任务（我们的常用例）
+### 示例 1：番茄任务
 
 ```
 Your task is to: heat some tomato and put it on the table.
@@ -91,17 +91,7 @@ Your task is to: heat some tomato and put it on the table.
 结果：失败 ❌  R = 0.0
 ```
 
-### ALFWorld 观测特点
-
-| 特征 | 说明 |
-|---|---|
-| 句式 | 高度模板化（"You arrive at X. On the X, you see Y."） |
-| 单步 token | 8~30 token，集中在 10~15 |
-| 长度一致性 | 不同任务/不同步之间长度相对均匀（无合成钥匙-门那种长度伪影） |
-| 历史累积 | 完整轨迹 50 步可达 20k+ token——**必须压缩** |
-| 可验证性 | 任务有明确成功/失败判据，可写程序自动判分 |
-
-### 示例 4（最长轨迹）：50 步复合任务——找两只铅笔放到不同位置
+### 示例 4
 
 ```
 Your task is to: find two pencils and put one on the desk and one on the shelf.
@@ -289,15 +279,6 @@ Your task is to: find two pencils and put one on the desk and one on the shelf.
      结果：成功 ✅  R = 1.0
 ────────────────────────────────────
 
-【轨迹统计】
-  - 总步数：50 步
-  - 有效步（找/放/确认）：~18 步（步0-10 + 步18-26）
-  - 多余穿梭（阶段七）：22 步（步28-49）—— agent 任务完成后还在反复检查
-  - 纯观测 ~650 token
-  - memory 累积（50步×平均15token观测 + 动作+系统prompt）≈ 20000+ token
-  - **压缩目标**：阶段七的 22 步多余穿梭应被压成 1~2 句摘要，节省 ~40% memory
-```
-
 ---
 
 ## WebShop
@@ -421,7 +402,7 @@ act: click[Buy Now]
 结果：失败 ❌  R = 0.0  (指令要求红色，选了黑色)
 ```
 
-### 示例 4（最长轨迹）：反复搜索翻页选商品
+### 示例 4：反复搜索翻页选商品
 
 ```
 指令: I need a birthday gift for my nephew. Something educational, for ages 6-8, under $35.
@@ -622,15 +603,4 @@ act: click[Buy Now]
 
 ---
 
-## 两个数据集的对比
 
-| | ALFWorld | WebShop |
-|---|---|---|
-| 任务类型 | 家居操作 | 电商购物 |
-| 观测格式 | 模板句 "You see X." | [SEP] 拼接的页面文字 |
-| 单步 token | 10~30 | 200~800 |
-| 轨迹长度 | 5~50 步 | 5~15 步 |
-| 完整轨迹 token | ~500~20000+ | ~2000~6000 |
-| 动作空间 | 位置+物品操作（take/put/open…） | 搜索/点击/选规格/购买 |
-| 成功判据 | 任务完成状态 | 商品属性匹配度 |
-| 长度伪影 | ❌ 模板句长度均匀 | ⚠️ 不同页面类型长度略有不均 |
