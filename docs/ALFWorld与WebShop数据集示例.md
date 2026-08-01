@@ -96,188 +96,154 @@ Your task is to: heat some tomato and put it on the table.
 ```
 Your task is to: find two pencils and put one on the desk and one on the shelf.
 
-────────────────────────────────────
-阶段一：盲搜——找第一支铅笔（步 0~19）
-────────────────────────────────────
+-- 阶段一：盲搜，找第一支铅笔（步0~7）--
 
-步0  obs: You are in the middle of a room. Looking around, you see a desk 1,
-          a shelf 1, a cabinet 1, a drawer 1, a sidetable 1, and a bed 1.     (~28 token)
-     act: go to desk 1
-步1  obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
-          a mug 1, and a pen 1.                                                (~20 token)
-     act: go to drawer 1
-步2  obs: You arrive at drawer 1. The drawer 1 is closed.                     (~8 token)
-     act: open drawer 1
-步3  obs: You open the drawer 1. In the drawer 1, you see a keychain 1,
-          a postit 1, and a creditcard 1.                                       (~18 token)
-     act: go to cabinet 1
-步4  obs: You arrive at cabinet 1. The cabinet 1 is closed.                   (~8 token)
-     act: open cabinet 1
-步5  obs: You open the cabinet 1. In the cabinet 1, you see a book 3,
-          a cd 2, and a newspaper 1.                                            (~20 token)
-     act: go to sidetable 1
-步6  obs: You arrive at sidetable 1. On the sidetable 1, you see an
-          alarmclock 1, a tissuebox 1, and a pencil 2.                          (~18 token)
-     act: take pencil 2 from sidetable 1                                     ← 找到第一支！
-步7  obs: You pick up the pencil 2 from the sidetable 1.                      (~10 token)
+步0 obs: You are in the middle of a room. Looking around, you see a desk 1,
+         a shelf 1, a cabinet 1, a drawer 1, a sidetable 1, and a bed 1.
+步0 act: go to desk 1
+步1 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
+         a mug 1, and a pen 1.
+步1 act: go to drawer 1
+步2 obs: You arrive at drawer 1. The drawer 1 is closed.
+步2 act: open drawer 1
+步3 obs: You open the drawer 1. In the drawer 1, you see a keychain 1,
+         a postit 1, and a creditcard 1.
+步3 act: go to cabinet 1
+步4 obs: You arrive at cabinet 1. The cabinet 1 is closed.
+步4 act: open cabinet 1
+步5 obs: You open the cabinet 1. In the cabinet 1, you see a book 3,
+         a cd 2, and a newspaper 1.
+步5 act: go to sidetable 1
+步6 obs: You arrive at sidetable 1. On the sidetable 1, you see an
+         alarmclock 1, a tissuebox 1, and a pencil 2.
+步6 act: take pencil 2 from sidetable 1                      ← 找到第一支！
+步7 obs: You pick up the pencil 2 from the sidetable 1.
 
-────────────────────────────────────
-阶段二：放第一支铅笔到 desk（步 8~9）
-────────────────────────────────────
+-- 阶段二：放第一支铅笔到 desk（步8~10）--
 
-步8  obs: Nothing happens.                                                    (~2 token)
-     act: go to desk 1
-步9  obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
-          a mug 1, and a pen 1.                                                (~20 token)
-     act: put pencil 2 on desk 1
-步10 obs: You put the pencil 2 on the desk 1.                                 (~10 token)
+步7 act: go to desk 1
+步8 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
+         a mug 1, and a pen 1.
+步8 act: put pencil 2 on desk 1
+步9 obs: You put the pencil 2 on the desk 1.                  ← 第一支 ✅
 
-     子任务完成：第一支铅笔 ✅
+-- 阶段三：搜第二支铅笔（步10~17）--
 
-────────────────────────────────────
-阶段三：搜第二支铅笔——先搜床和书架（步 11~19）
-────────────────────────────────────
+步9 act: go to bed 1
+步10 obs: You arrive at bed 1. On the bed 1, you see a pillow 1,
+          a book 2, and a cellphone 1.
+步10 act: go to shelf 1
+步11 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
+          a statue 1, and a bowl 1.
+步11 act: go to sidetable 1                                   ← 折返
+步12 obs: You arrive at sidetable 1. On the sidetable 1, you see an
+          alarmclock 1 and a tissuebox 1.                     ← pencil 2 已拿走
+步12 act: go to cabinet 1
+步13 obs: You arrive at cabinet 1. The cabinet 1 is open.
+          In the cabinet 1, you see a book 3, a cd 2, and a newspaper 1.
+步13 act: go to drawer 1
+步14 obs: You arrive at drawer 1. The drawer 1 is open.
+          In the drawer 1, you see a keychain 1, a postit 1, and a creditcard 1.
+步14 act: go to desk 1
+步15 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
+          a mug 1, a pen 1, and a pencil 2.                   ← 刚才放的，不能拿
+步15 act: go to dresser 1
 
-步11 obs: Nothing happens.                                                    (~2 token)
-     act: go to bed 1
-步12 obs: You arrive at bed 1. On the bed 1, you see a pillow 1,
-          a book 2, and a cellphone 1.                                         (~18 token)
-     act: go to shelf 1
-步13 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
-          a statue 1, and a bowl 1.                                            (~18 token)
-     act: go to sidetable 1                                                  ← 折返，上次这里找到过
-步14 obs: You arrive at sidetable 1. On the sidetable 1, you see an
-          alarmclock 1 and a tissuebox 1.                                      (~14 token)
-     act: go to cabinet 1
-步15 obs: You arrive at cabinet 1. The cabinet 1 is open.
-          In the cabinet 1, you see a book 3, a cd 2, and a newspaper 1.       (~22 token)
-     act: go to drawer 1
-步16 obs: You arrive at drawer 1. The drawer 1 is open.
-          In the drawer 1, you see a keychain 1, a postit 1,
-          and a creditcard 1.                                                   (~22 token)
-     act: go to desk 1
-步17 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
-          a mug 1, a pen 1, and a pencil 2.                                    (~22 token)
-     注意：pencil 2 是刚才放的——不能拿同一支
-     act: go to sidetable 1
+-- 阶段四：扩大搜索，进隔壁房间（步16~21）--
 
-────────────────────────────────────
-阶段四：扩大搜索——进入隔壁房间（步 18~35）
-────────────────────────────────────
+步16 obs: You arrive at dresser 1. On the dresser 1, you see a comb 1,
+          a mirror 1, and a hairclip 1.
+步16 act: open dresser 1
+步17 obs: You open the dresser 1. In the dresser 1, you see a tshirt 2,
+          a pair of socks 1, and a pencil 3.
+步17 act: take pencil 3 from dresser 1                        ← 找到第二支！
 
-步18 obs: You arrive at sidetable 1. On the sidetable 1, you see an
-          alarmclock 1 and a tissuebox 1.                                      (~14 token)
-     act: go to dresser 1
-步19 obs: You arrive at dresser 1. On the dresser 1, you see a comb 1,
-          a mirror 1, and a hairclip 1.                                        (~18 token)
-     act: open dresser 1
-步20 obs: You open the dresser 1. In the dresser 1, you see a tshirt 2,
-          a pair of socks 1, and a pencil 3.                                    (~20 token)
-     act: take pencil 3 from dresser 1                                       ← 找到第二支！
-步21 obs: You pick up the pencil 3 from the dresser 1.                        (~10 token)
+-- 阶段五：放第二支铅笔到 shelf（步18~21）--
 
-────────────────────────────────────
-阶段五：放第二支铅笔到 shelf（步 22~26）
-────────────────────────────────────
+步18 obs: You pick up the pencil 3 from the dresser 1.
+步18 act: go to shelf 1
+步19 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
+          a statue 1, and a bowl 1.
+步19 act: put pencil 3 on shelf 1
+步20 obs: You put the pencil 3 on the shelf 1.                ← 第二支 ✅
 
-步22 obs: Nothing happens.                                                    (~2 token)
-     act: go to shelf 1
-步23 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
-          a statue 1, and a bowl 1.                                            (~18 token)
-     act: put pencil 3 on shelf 1
-步24 obs: You put the pencil 3 on the shelf 1.                                (~10 token)
+-- 阶段六：确认检查（步21~27）--
 
-     子任务完成：第二支铅笔 ✅
+步20 act: go to desk 1
+步21 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
+          a mug 1, a pen 1, and a pencil 2.                   ✅ desk 上有 pencil
+步21 act: go to shelf 1
+步22 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
+          a statue 1, a bowl 1, and a pencil 3.               ✅ shelf 上有 pencil
 
-────────────────────────────────────
-阶段六：检查——确认两个 pencil 在正确位置（步 25~35）
-────────────────────────────────────
-
-步25 obs: Nothing happens.                                                    (~2 token)
-     act: go to desk 1
-步26 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
-          a mug 1, a pen 1, and a pencil 2.                                    (~22 token)
-     ✅ pencil 2 在 desk 上
-     act: go to shelf 1
-步27 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
-          a statue 1, a bowl 1, and a pencil 3.                                (~22 token)
-     ✅ pencil 3 在 shelf 上
-     act: go to sidetable 1
-
-────────────────────────────────────
-阶段七：agent 犹豫——多余搜索（步 28~49）
-────────────────────────────────────
+-- 阶段七：agent 犹豫，多余穿梭（步23~49）--
 （实际 ALFWorld agent 常因不确定而继续搜索无关区域——这正是压缩要删掉的流水账）
 
-步28 obs: You arrive at sidetable 1. On the sidetable 1, you see an
-          alarmclock 1 and a tissuebox 1.                                      (~14 token)
-     act: go to coffeetable 1
-步29 obs: You arrive at coffeetable 1. On the coffeetable 1, you see a
-          magazine 2, a remotecontrol 1, and a coaster 1.                      (~20 token)
-     act: go to armchair 1
-步30 obs: You arrive at armchair 1. On the armchair 1, you see a cushion 1
-          and a book 1.                                                        (~14 token)
-     act: go to diningtable 1
-步31 obs: You arrive at diningtable 1. On the diningtable 1, you see a
-          plate 2, a fork 1, a knife 1, and a cup 1.                           (~22 token)
-     act: go to countertop 1
-步32 obs: You arrive at countertop 1. On the countertop 1, you see a
-          microwave 1, a toaster 1, and a cuttingboard 1.                     (~18 token)
-     act: go to fridge 1
-步33 obs: You arrive at fridge 1. The fridge 1 is closed.                     (~8 token)
-     act: open fridge 1
-步34 obs: You open the fridge 1. In the fridge 1, you see an apple 2,
-          a carton of milk 1, and a butter 1.                                   (~20 token)
-     act: close fridge 1
-步35 obs: You close the fridge 1.                                             (~6 token)
-     act: go to garbagecan 1
-步36 obs: You arrive at garbagecan 1. The garbagecan 1 is empty.              (~8 token)
-     act: go to countertop 1
-步37 obs: You arrive at countertop 1. On the countertop 1, you see a
-          microwave 1, a toaster 1, and a cuttingboard 1.                     (~18 token)
-     act: go to cabinet 1
-步38 obs: You arrive at cabinet 1. The cabinet 1 is open.
-          In the cabinet 1, you see a book 3, a cd 2, and a newspaper 1.       (~22 token)
-     act: go to drawer 1
-步39 obs: You arrive at drawer 1. The drawer 1 is open.
-          In the drawer 1, you see a keychain 1, a postit 1,
-          and a creditcard 1.                                                   (~22 token)
-     act: go to sidetable 1
-步40 obs: You arrive at sidetable 1. On the sidetable 1, you see an
-          alarmclock 1 and a tissuebox 1.                                      (~14 token)
-     act: go to dresser 1
-步41 obs: You arrive at dresser 1. The dresser 1 is open.
-          On the dresser 1, you see a comb 1, a mirror 1, and a hairclip 1.    (~24 token)
-     act: go to coffeetable 1
-步42 obs: You arrive at coffeetable 1. On the coffeetable 1, you see a
-          magazine 2, a remotecontrol 1, and a coaster 1.                      (~20 token)
-     act: go to armchair 1
-步43 obs: You arrive at armchair 1. On the armchair 1, you see a cushion 1
-          and a book 1.                                                        (~14 token)
-     act: go to bed 1
-步44 obs: You arrive at bed 1. On the bed 1, you see a pillow 1,
-          a book 2, and a cellphone 1.                                         (~18 token)
-     act: go to desk 1
-步45 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
-          a mug 1, a pen 1, and a pencil 2.                                    (~22 token)
-     ✅ pencil 2 仍然在 desk 上
-     act: go to shelf 1
-步46 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
-          a statue 1, a bowl 1, and a pencil 3.                                (~22 token)
-     ✅ pencil 3 仍然在 shelf 上
-     act: go to sidetable 1
-步47 obs: You arrive at sidetable 1. On the sidetable 1, you see an
-          alarmclock 1 and a tissuebox 1.                                      (~14 token)
-     act: go to desk 1
-步48 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
-          a mug 1, a pen 1, and a pencil 2.                                    (~22 token)
-     act: look around
-步49 obs: You look around the room. You see a desk 1, a shelf 1,
-          and a sidetable 1 nearby. Everything looks fine.                     (~22 token)
+步22 act: go to coffeetable 1
+步23 obs: You arrive at coffeetable 1. On the coffeetable 1, you see a
+          magazine 2, a remotecontrol 1, and a coaster 1.
+步23 act: go to armchair 1
+步24 obs: You arrive at armchair 1. On the armchair 1, you see a cushion 1
+          and a book 1.
+步24 act: go to diningtable 1
+步25 obs: You arrive at diningtable 1. On the diningtable 1, you see a
+          plate 2, a fork 1, a knife 1, and a cup 1.
+步25 act: go to countertop 1
+步26 obs: You arrive at countertop 1. On the countertop 1, you see a
+          microwave 1, a toaster 1, and a cuttingboard 1.
+步26 act: go to fridge 1
+步27 obs: You arrive at fridge 1. The fridge 1 is closed.
+步27 act: open fridge 1
+步28 obs: You open the fridge 1. In the fridge 1, you see an apple 2,
+          a carton of milk 1, and a butter 1.
+步28 act: close fridge 1
+步29 obs: You close the fridge 1.
+步29 act: go to garbagecan 1
+步30 obs: You arrive at garbagecan 1. The garbagecan 1 is empty.
+步30 act: go to countertop 1
+步31 obs: You arrive at countertop 1. On the countertop 1, you see a
+          microwave 1, a toaster 1, and a cuttingboard 1.
+步31 act: go to cabinet 1
+步32 obs: You arrive at cabinet 1. The cabinet 1 is open.
+          In the cabinet 1, you see a book 3, a cd 2, and a newspaper 1.
+步32 act: go to drawer 1
+步33 obs: You arrive at drawer 1. The drawer 1 is open.
+          In the drawer 1, you see a keychain 1, a postit 1, and a creditcard 1.
+步33 act: go to sidetable 1
+步34 obs: You arrive at sidetable 1. On the sidetable 1, you see an
+          alarmclock 1 and a tissuebox 1.
+步34 act: go to dresser 1
+步35 obs: You arrive at dresser 1. The dresser 1 is open.
+          On the dresser 1, you see a comb 1, a mirror 1, and a hairclip 1.
+步35 act: go to coffeetable 1
+步36 obs: You arrive at coffeetable 1. On the coffeetable 1, you see a
+          magazine 2, a remotecontrol 1, and a coaster 1.
+步36 act: go to armchair 1
+步37 obs: You arrive at armchair 1. On the armchair 1, you see a cushion 1
+          and a book 1.
+步37 act: go to bed 1
+步38 obs: You arrive at bed 1. On the bed 1, you see a pillow 1,
+          a book 2, and a cellphone 1.
+步38 act: go to desk 1
+步39 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
+          a mug 1, a pen 1, and a pencil 2.                   ✅ 还在
+步39 act: go to shelf 1
+步40 obs: You arrive at shelf 1. On the shelf 1, you see a watch 1,
+          a statue 1, a bowl 1, and a pencil 3.               ✅ 还在
+步40 act: go to sidetable 1
+步41 obs: You arrive at sidetable 1. On the sidetable 1, you see an
+          alarmclock 1 and a tissuebox 1.
+步41 act: go to desk 1
+步42 obs: You arrive at desk 1. On the desk 1, you see a laptop 2,
+          a mug 1, a pen 1, and a pencil 2.
+步42 act: look around
+步43 obs: You look around the room. You see a desk 1, a shelf 1,
+          and a sidetable 1 nearby. Everything looks fine.
 
-────────────────────────────────────
-     结果：成功 ✅  R = 1.0
-────────────────────────────────────
+结果：成功 ✅  R = 1.0
+```
+
+> **轨迹统计**：50 步，有效步 ~18（阶段一~六），多余穿梭 22 步（阶段七）。纯观测 ~650 token，memory 累积（50 步 × ~15 token 观测 + 动作 + 系统 prompt）≈ 20000+ token。**压缩目标**：阶段七的 22 步应被压成 1~2 句摘要，节省 ~40% memory。
 
 ---
 
